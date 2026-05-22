@@ -239,19 +239,21 @@ Gar-Feature-Generator/
 ├── requirements.txt
 ├── setup.py
 ├── src/
-│   ├── feature_generator.py              # 统一入口（自动选择CPU/分布式模式）
-│   ├── gar_feature_generator.py          # GAR-Inspired特征生成器
-│   ├── gar_feature_generator_gpu.py       # GPU加速版GAR
-│   ├── kg_brute_force_generator.py       # KG Brute Force特征生成器
-│   ├── kg_feature_generator.py           # 通用KG特征生成器（白样本模式）
-│   ├── kg_feature_generator_dist.py      # 分布式KG特征生成器
-│   ├── kg_feature_generator_gpu.py       # GPU加速版KG
-│   ├── train_classifier.py               # 独立模型训练器
-│   └── feature_utils.py                  # 公共工具
+│   ├── feature_generator.py               # 统一入口（自动选择CPU/分布式模式）
+│   ├── gar_feature_generator.py            # GAR-Inspired特征生成器
+│   ├── gar_feature_generator_dist.py      # 分布式GAR特征生成器
+│   ├── gar_feature_generator_ascend.py    # Ascend NPU加速GAR
+│   ├── kg_brute_force_generator.py        # KG Brute Force特征生成器
+│   ├── kg_feature_generator.py            # 通用KG特征生成器（白样本模式）
+│   ├── kg_feature_generator_dist.py       # 分布式KG特征生成器
+│   ├── kg_feature_generator_ascend.py     # Ascend NPU加速KG
+│   ├── kg_feature_generator_gpu.py        # GPU加速版KG
+│   ├── train_classifier.py                # 独立模型训练器
+│   └── feature_utils.py                    # 公共工具
 ├── docs/
 │   ├── ALGORITHM_DETAILS.md
 │   └── PAPER_REFERENCES.md
-└── outputs/                               # 实验结果输出
+└── outputs/                                # 实验结果输出
 ```
 
 ---
@@ -264,6 +266,16 @@ Gar-Feature-Generator/
 | 50万-1000万 | 分布式(8 workers) | 10-30分钟 | 8-16GB |
 | 1000万-1亿 | 分布式(16+ workers) | 30-120分钟 | 16-32GB |
 | > 1亿 | GPU/分布式 | 视硬件而定 | 32GB+ |
+
+### GAR特征加速支持
+
+GAR特征生成器支持以下加速模式：
+
+| 模式 | 脚本 | 说明 |
+|------|------|------|
+| CPU | `gar_feature_generator.py` | 默认模式 |
+| 分布式 | `gar_feature_generator_dist.py` | 多进程并行 |
+| Ascend NPU | `gar_feature_generator_ascend.py` | 华为昇腾NPU加速 |
 
 ### 大规模数据处理模式
 
@@ -282,11 +294,17 @@ python src/feature_generator.py --data /path/to/data.csv \
                                  --output-csv ./features.csv
 
 # ============ Ascend NPU加速 ============
-# Ascend NPU模式（需要安装CANN或torch with Ascend后端）
+# KG特征 - Ascend NPU模式
 python src/kg_feature_generator_ascend.py --data /path/to/data.csv \
                                             --card-col card_id \
                                             --npu-id 0 \
                                             --output-csv ./features.csv
+
+# GAR特征 - Ascend NPU模式
+python src/gar_feature_generator_ascend.py --data /path/to/data.csv \
+                                             --card-col card_id \
+                                             --npu-id 0 \
+                                             --output-csv ./gar_features.csv
 
 # 多NPU分布式
 python src/kg_feature_generator_ascend.py --data /path/to/large_data.csv \
