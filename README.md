@@ -268,22 +268,46 @@ Gar-Feature-Generator/
 ### 大规模数据处理模式
 
 ```bash
-# 分布式模式（千万级数据）
+# ============ 硬件检测 ============
+# 检查所有可用的硬件加速器
+python src/feature_generator.py --check-hardware
+
+# Ascend NPU状态检测
+python src/kg_feature_generator_ascend.py --check-npu
+
+# ============ 统一入口（自动选择模式）============
+# 自动选择CPU或分布式模式
+python src/feature_generator.py --data /path/to/data.csv \
+                                 --card-col card_id \
+                                 --output-csv ./features.csv
+
+# ============ Ascend NPU加速 ============
+# Ascend NPU模式（需要安装CANN或torch with Ascend后端）
+python src/kg_feature_generator_ascend.py --data /path/to/data.csv \
+                                            --card-col card_id \
+                                            --npu-id 0 \
+                                            --output-csv ./features.csv
+
+# 多NPU分布式
+python src/kg_feature_generator_ascend.py --data /path/to/large_data.csv \
+                                            --card-col card_id \
+                                            --npus 0,1,2,3 \
+                                            --workers 4 \
+                                            --output-csv ./features.csv
+
+# ============ 分布式模式 ============
+# 分布式模式（千万级数据，16 workers）
 python src/feature_generator.py --data /path/to/large_data.csv \
                                  --card-col card_id \
                                  --mode distributed \
                                  --workers 16 \
                                  --output-csv ./features.csv
 
-# 统一入口（自动选择模式）
-python src/feature_generator.py --data /path/to/data.csv \
-                                 --card-col card_id \
-                                 --output-csv ./features.csv
-
-# 多GPU（需要cupy）
+# ============ GPU加速（CUDA）============
+# GPU模式（需要cupy）
 python src/kg_feature_generator_gpu.py --data /path/to/data.csv \
                                         --card-col card_id \
-                                        --gpus 0,1,2,3 \
+                                        --gpu-id 0 \
                                         --output-csv ./features.csv
 ```
 
@@ -294,11 +318,19 @@ python src/kg_feature_generator_gpu.py --data /path/to/data.csv \
 3. **并行处理**: 多进程独立构建子图和特征
 4. **结果合并**: 归并排序，保持原始顺序
 
-### GPU加速设计
+### 硬件加速器支持
 
-- 使用CuPy进行GPU加速（图构建、特征计算）
-- 自动检测GPU可用性和内存
-- 适合数据量在显存容纳范围内的场景
+| 硬件 | 检测命令 | 加速方式 |
+|------|---------|----------|
+| CPU | `--check-hardware` | 多进程分布式 |
+| CUDA GPU | `--check-hardware` | CuPy |
+| Ascend NPU | `--check-npu` | 优化CPU实现/原生CANN |
+
+Ascend NPU检测逻辑：
+1. 检查`ASCEND_HOME_PATH`环境变量
+2. 检查`LD_LIBRARY_PATH`中的cann路径
+3. 检查torch后端是否为Ascend
+4. 尝试导入`acl`模块
 
 ---
 
