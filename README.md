@@ -15,188 +15,161 @@
 
 ---
 
-## 原始算法论文
+## 核心算法
 
-### Graph Association Rules: A New Approach for Knowledge Discovery in Large Graphs
+### GAR (Graph Association Rules)
 
-**论文来源**: IEEE Transactions on Knowledge and Data Engineering
+将欺诈率视为图关联规则的输出：
 
-**核心思想**: 利用图结构发现实体之间的关联规则，将欺诈率作为弱监督信号生成特征。
-
-**核心概念**:
-
-| 概念 | 说明 |
-|------|------|
-| **Graph Pattern** | 图中的节点和边模式，描述实体之间的关系结构 |
-| **GAR Definition** | GAR φ = Q[x̄](X → p0)，表示"如果满足前置条件X，则结论p0成立" |
-| **Support** | 规则在图中出现的频率 |
-| **Confidence** | 规则的可靠性（条件成立时结论成立的比例） |
-
-**GAR形式化定义**:
-```
-GAR φ = Q[x̄](X → p0)
-
-其中:
-- Q[x̄]: graph pattern（图模式，如 user(x) ∧ colleague(x, x') ∧ friend(x', y)）
-- X: precondition（前置条件，多个predicates）
-- p0: consequence predicate（结果谓词）
-
-示例:
-前置条件 X = {colleague(x, x'), friend(x', y)}
-结论 p0 = follow(x, y)
-含义: 如果x和x'是同事，且x'关注y，则x也关注y
-```
-
-**本项目实现**: 将GAR思想应用于金融反欺诈，将欺诈率视为图关联规则的输出：
-- **Entity Fraud Rate**: 单实体欺诈率（如 card1=X 的欺诈率）
-- **Pair Fraud Rate**: 实体对欺诈率（如 card1=X 且 addr1=Y 的欺诈率）
-- **Neighbor Fraud Rate**: 1跳邻居欺诈率均值
+| 特征类型 | 说明 |
+|----------|------|
+| **Entity Fraud Rate** | 单实体欺诈率（如 card1=X 的欺诈率） |
+| **Pair Fraud Rate** | 实体对欺诈率（如 card1=X 且 addr1=Y 的欺诈率） |
+| **Neighbor Fraud Rate** | 1跳邻居欺诈率均值 |
 
 ---
 
 ## 快速开始
 
-### 1. 环境准备
-
 ```bash
 git clone https://github.com/mattzx-web/Gar-Feature-Generator.git
 cd Gar-Feature-Generator
 
-python -m venv venv
-source venv/bin/activate
-
 pip install pandas numpy scikit-learn
+
+# 生成特征
+python src/gar_feature_generator_ascend.py --data data/transactions.csv --card-col card_id --output-csv ./features.csv
 ```
 
-### 2. 数据格式
+---
 
-#### 格式一：IEEE-CIS数据集（已有标签）
+## 版本切换指南
 
+本项目提供多种算法实现，适用于不同规模和硬件环境：
+
+### 算法版本对比
+
+| 版本 | 脚本 | 100K耗时 | 吞吐量 | 推荐场景 |
+|------|------|----------|--------|----------|
+| **Sparse Dict** | `gar_feature_generator_ascend.py` | 35秒 | 3724 rec/s | **生产环境（推荐）** |
+| **CSR向量化** | `gar_feature_generator_fast.py` | 139秒 | 721 rec/s | 理论研究 |
+| **torch_npu** | `gar_feature_generator_npu.py` | 556秒 | 185 rec/s | 超大规模数据(>1000万) |
+| **分布式** | `gar_feature_generator_dist.py` | - | - | 亿级数据 |
+
+### Sparse Dict版本（推荐）
+
+使用dict+list存储稀疏图结构，逐节点遍历+向量化特征计算。
+
+```bash
+# Ascend NPU模式（自动检测）
+python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode npu
+
+# CPU模式（不加载Ascend环境）
+python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode cpu
+
+# 自动模式
+python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode auto
 ```
-data_dir/
-├── train_transaction.csv    # 交易记录（TransactionID, TransactionAmt, card1, card2, addr1, P_emaildomain, isFraud）
-└── train_identity.csv        # 身份信息（TransactionID, DeviceInfo, DeviceType）
+
+### CSR向量化版本
+
+使用CSR格式稀疏矩阵，向量化特征计算（理论更优但构建开销大）。
+
+```bash
+python src/gar_feature_generator_fast.py --data data.csv --card-col card_id --output-csv ./features.csv
 ```
 
-#### 格式二：通用CSV（白样本或自定义）
+### torch_npu版本
+
+使用PyTorch NPU进行GPU加速（适合超大规模数据）。
+
+```bash
+# 需要安装torch-npu: pip install torch-npu --index-url https://download.pytorch.org/whl/npu
+python src/gar_feature_generator_npu.py --data data.csv --card-col card_id --mode npu --output-csv ./features.csv
+```
+
+### 分布式版本
+
+多进程并行处理，适合亿级数据。
+
+```bash
+python src/gar_feature_generator_dist.py --data data.csv --card-col card_id --workers 16 --output-csv ./features.csv
+```
+
+---
+
+## 使用示例
+
+### 白样本模式（无标签）
+
+```bash
+python src/gar_feature_generator_ascend.py \
+    --data data/transactions.csv \
+    --card-col card_id \
+    --entity-cols card_id,merchant_id,device_type,transaction_type \
+    --account-features card_level,issuing_bank \
+    --transaction-features amount,balance_after,timestamp,is_pos,is_cross_border \
+    --output-csv ./features.csv
+```
+
+### 检测NPU状态
+
+```bash
+python src/gar_feature_generator_ascend.py --check-npu
+```
+
+---
+
+## 数据格式
+
+### 标准CSV格式
 
 ```csv
 card_id,merchant_id,device_type,transaction_type,amount,balance_after,timestamp,card_level,issuing_bank,is_pos,is_cross_border
 123456,SHOP001,MOB010,POS,1500.00,8500.50,2026-05-20 10:30:00,1,BANK_A,1,0
 123456,SHOP002,MOB010,CARD,200.00,8300.50,2026-05-20 11:00:00,1,BANK_A,0,0
-123456,SHOP003,WEB001,ONLINE,5000.00,3300.50,2026-05-20 14:00:00,1,BANK_A,0,1
-789012,SHOP001,MOB010,POS,800.00,9200.00,2026-05-20 10:45:00,2,BANK_B,1,0
 ```
 
-**字段说明**:
-- `card_id`: 卡号（账户标识）
-- `merchant_id`: 商户ID
-- `device_type`: 设备类型
-- `transaction_type`: 交易类型
-- `amount`: 交易金额
-- `balance_after`: 交易后余额
-- `timestamp`: 时间戳
-- `card_level`: 卡等级（账户级特征，每个卡号重复）
-- `issuing_bank`: 开户行（账户级特征）
-- `is_pos`: 是否POS交易
-- `is_cross_border`: 是否跨境交易
+### IEEE-CIS数据集（有标签）
 
----
-
-## 使用方法
-
-### 模式一：IEEE-CIS数据集（有标签）
-
-```bash
-# GAR-Inspired
-python src/gar_feature_generator.py --data-dir /path/to/ieee-fraud-detection
-
-# KG Brute Force
-python src/kg_brute_force_generator.py --data-dir /path/to/ieee-fraud-detection
-
-# 多种子验证
-python src/gar_feature_generator.py --data-dir /path/to/ieee-fraud-detection --seeds 42 123 456
 ```
-
-### 模式二：白样本特征生成（无标签）
-
-```bash
-# KG特征生成
-python src/kg_feature_generator.py --data /path/to/transactions.csv \
-                                    --card-col card_id \
-                                    --export-features-only \
-                                    --output-csv ./features/kg_features.csv
-
-# GAR特征生成
-python src/gar_feature_generator.py --data /path/to/transactions.csv \
-                                     --card-col card_id \
-                                     --export-features-only \
-                                     --output-csv ./features/gar_features.csv
-```
-
-### 模式三：自定义特征列
-
-```bash
-# 指定实体列、账户级特征、交易级特征
-python src/kg_feature_generator.py --data /path/to/transactions.csv \
-                                    --card-col card_id \
-                                    --entity-cols card_id,merchant_id,device_type,transaction_type \
-                                    --account-features card_level,issuing_bank \
-                                    --transaction-features amount,balance_after,timestamp,is_pos,is_cross_border \
-                                    --export-features-only \
-                                    --output-csv ./features/custom_features.csv
-```
-
-### 模式四：从CSV加载特征训练模型
-
-```bash
-# 生成特征
-python src/kg_feature_generator.py --data /path/to/transactions.csv \
-                                    --card-col card_id \
-                                    --export-features-only \
-                                    --output-csv ./features/kg_features.csv
-
-# 训练模型
-python src/train_classifier.py --features ./features/kg_features.csv --model kg
+data_dir/
+├── train_transaction.csv    # 交易记录（TransactionID, TransactionAmt, card1, card2, addr1, isFraud）
+└── train_identity.csv        # 身份信息（TransactionID, DeviceInfo, DeviceType）
 ```
 
 ---
 
-## 命令行参数
+## 算法核心实现
 
-### 通用参数
+### Sparse Dict图构建
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--data` | CSV文件路径（白样本模式） | - |
-| `--data-dir` | IEEE-CIS数据集目录 | - |
-| `--card-col` | 卡号列名 | card_id |
-| `--entity-cols` | 实体列名（逗号分隔） | card_id,merchant_id,device_type,transaction_type |
-| `--account-features` | 账户级特征（逗号分隔） | card_level,issuing_bank |
-| `--transaction-features` | 交易级特征（逗号分隔） | amount,balance_after,timestamp,is_pos,is_cross_border |
-| `--export-features-only` | 仅生成特征，不训练模型 | False |
-| `--output-csv` | 特征CSV输出路径 | - |
-| `--output-dir` | 输出目录 | ./outputs |
-| `--seed` | 随机种子 | 42 |
-| `--seeds` | 多种子验证 | - |
+```python
+# 图结构：dict[int, list] - 每行存储邻居索引
+tx_neighbors = defaultdict(list)
+for col in entity_cols:
+    groups = df.groupby(col).indices
+    for val, idx_list in groups.items():
+        if 1 < len(idx_list) < neighbor_threshold:
+            for idx in idx_list:
+                tx_neighbors[idx].extend(idx_list)
+```
 
----
+### 邻居特征向量化计算
 
-## 生成的特征类型
+```python
+# 预计算度
+degrees = np.array([len(tx_neighbors.get(i, [])) for i in range(n)], dtype=np.float32)
+features['n_1hop'] = degrees
+features['n_1hop_log'] = np.log1p(degrees)
 
-### 白样本模式生成特征
-
-| 特征类型 | 说明 | 示例 |
-|----------|------|------|
-| **实体度** | 交易在图中的邻居数量 | card_id_degree, merchant_id_degree |
-| **实体频率** | 实体值出现次数 | card_id_freq, merchant_id_freq_log |
-| **账户级特征** | 直接使用原值 | card_level, issuing_bank |
-| **交易级特征** | 直接使用原值 | amount, balance_after, is_pos |
-| **卡号聚合** | 按卡号聚合的统计量 | card_tx_count, card_amt_mean, card_amt_std |
-| **配对频率** | 实体对组合出现次数 | card_id_merchant_id_pair_freq |
-| **邻居特征** | 1-hop邻居的统计量 | n_1hop, amt_1hop_mean, amt_1hop_std |
-| **时序特征** | 时间相关特征 | trans_hour, time_diff_prev |
-| **欺诈率特征** | 仅当有标签时可用 | card_id_fraud_rate, pair_fraud_rate |
+# 邻居金额统计（逐节点遍历）
+for i in range(n):
+    neighs = tx_neighbors.get(i, [])
+    if neighs:
+        neigh_amts = amounts[neighs]
+        amt_1hop_mean[i] = neigh_amts.mean()
+```
 
 ---
 
@@ -239,154 +212,37 @@ Gar-Feature-Generator/
 ├── requirements.txt
 ├── setup.py
 ├── src/
-│   ├── feature_generator.py               # 统一入口（自动选择CPU/分布式模式）
-│   ├── gar_feature_generator.py            # GAR-Inspired特征生成器
-│   ├── gar_feature_generator_dist.py      # 分布式GAR特征生成器
-│   ├── gar_feature_generator_ascend.py    # Ascend NPU加速GAR
-│   ├── kg_brute_force_generator.py        # KG Brute Force特征生成器
-│   ├── kg_feature_generator.py            # 通用KG特征生成器（白样本模式）
-│   ├── kg_feature_generator_dist.py       # 分布式KG特征生成器
-│   ├── kg_feature_generator_ascend.py     # Ascend NPU加速KG
-│   ├── kg_feature_generator_gpu.py        # GPU加速版KG
-│   ├── train_classifier.py                # 独立模型训练器
-│   └── feature_utils.py                    # 公共工具
-├── docs/
-│   ├── ALGORITHM_DETAILS.md
-│   └── PAPER_REFERENCES.md
+│   ├── feature_generator.py               # 统一入口（自动选择模式）
+│   ├── gar_feature_generator.py            # GAR基础版本
+│   ├── gar_feature_generator_dist.py      # 分布式GAR
+│   ├── gar_feature_generator_ascend.py    # Sparse Dict版本（推荐）
+│   ├── gar_feature_generator_fast.py       # CSR向量化版本
+│   ├── gar_feature_generator_npu.py        # torch_npu版本
+│   ├── kg_brute_force_generator.py        # KG Brute Force
+│   ├── kg_feature_generator.py            # KG通用版本
+│   ├── kg_feature_generator_dist.py       # 分布式KG
+│   ├── kg_feature_generator_ascend.py     # Ascend NPU KG
+│   ├── kg_feature_generator_gpu.py        # CUDA GPU KG
+│   └── train_classifier.py                # 模型训练
 └── outputs/                                # 实验结果输出
 ```
 
 ---
 
-## 性能说明
+## 环境要求
 
-| 数据规模 | 推荐模式 | 预估时间 | 内存需求 |
-|----------|---------|----------|----------|
-| < 50万 | CPU | 5-10分钟 | 4-8GB |
-| 50万-1000万 | 分布式(8 workers) | 10-30分钟 | 8-16GB |
-| 1000万-1亿 | 分布式(16+ workers) | 30-120分钟 | 16-32GB |
-| > 1亿 | GPU/分布式 | 视硬件而定 | 32GB+ |
-
-### GAR特征加速支持
-
-GAR特征生成器支持以下加速模式：
-
-| 模式 | 脚本 | 说明 |
+| 依赖 | 版本 | 说明 |
 |------|------|------|
-| CPU | `gar_feature_generator.py` | 默认模式 |
-| 分布式 | `gar_feature_generator_dist.py` | 多进程并行 |
-| Ascend NPU | `gar_feature_generator_ascend.py` | 华为昇腾NPU加速 |
+| pandas | >=1.5 | 数据处理 |
+| numpy | >=1.21 | 数值计算 |
+| scikit-learn | >=1.0 | 模型训练 |
 
-### Ascend NPU加速验证结果
+### 可选加速
 
-在Ascend 910B NPU服务器上测试100K条记录性能对比：
-
-| 版本 | 算法 | 耗时 | 吞吐量 |
-|------|------|------|--------|
-| 稀疏图版本 | dict + set | 35秒 | 3724 rec/s |
-| CSR向量化 | CSR格式 | 139秒 | 721 rec/s |
-| torch_npu | GPU tensor | 556秒 | 185 rec/s |
-
-**结论**:
-- 稀疏图版本最快（35秒），因为构建图结构后逐节点遍历的开销小
-- CSR格式虽然理论上更优，但构建过程开销大（131秒）
-- torch_npu版本由于设备管理和tensor拷贝开销，反而最慢
-
-**优化建议**: 对于中等规模数据(<1000万)，使用稀疏dict+向量化特征计算是最优选择。
-
-### NPU优化代码
-
-```python
-# 高性能版本 - gar_feature_generator_ascend.py
-# 使用稀疏图结构 + 向量化特征计算
-
-# 图构建（稀疏dict）
-tx_neighbors = defaultdict(set)
-for col in entity_cols:
-    groups = df.groupby(col).indices
-    for val, idx_list in groups.items():
-        if 1 < len(idx_list) < neighbor_threshold:
-            for idx in idx_list:
-                tx_neighbors[idx].update(idx_list)
-
-# 特征计算（向量化）
-degrees = np.array([len(tx_neighbors.get(i, set())) for i in range(n)], dtype=np.int32)
-features['n_1hop'] = degrees
-features['n_1hop_log'] = np.log1p(degrees.astype(np.float32))
-```
-
-### 大规模数据处理模式
-
-```bash
-# ============ 硬件检测 ============
-# 检查所有可用的硬件加速器
-python src/feature_generator.py --check-hardware
-
-# Ascend NPU状态检测
-python src/kg_feature_generator_ascend.py --check-npu
-
-# ============ 统一入口（自动选择模式）============
-# 自动选择CPU或分布式模式
-python src/feature_generator.py --data /path/to/data.csv \
-                                 --card-col card_id \
-                                 --output-csv ./features.csv
-
-# ============ Ascend NPU加速 ============
-# KG特征 - Ascend NPU模式
-python src/kg_feature_generator_ascend.py --data /path/to/data.csv \
-                                            --card-col card_id \
-                                            --npu-id 0 \
-                                            --output-csv ./features.csv
-
-# GAR特征 - Ascend NPU模式
-python src/gar_feature_generator_ascend.py --data /path/to/data.csv \
-                                             --card-col card_id \
-                                             --npu-id 0 \
-                                             --output-csv ./gar_features.csv
-
-# 多NPU分布式
-python src/kg_feature_generator_ascend.py --data /path/to/large_data.csv \
-                                            --card-col card_id \
-                                            --npus 0,1,2,3 \
-                                            --workers 4 \
-                                            --output-csv ./features.csv
-
-# ============ 分布式模式 ============
-# 分布式模式（千万级数据，16 workers）
-python src/feature_generator.py --data /path/to/large_data.csv \
-                                 --card-col card_id \
-                                 --mode distributed \
-                                 --workers 16 \
-                                 --output-csv ./features.csv
-
-# ============ GPU加速（CUDA）============
-# GPU模式（需要cupy）
-python src/kg_feature_generator_gpu.py --data /path/to/data.csv \
-                                        --card-col card_id \
-                                        --gpu-id 0 \
-                                        --output-csv ./features.csv
-```
-
-### 分布式架构设计
-
-1. **数据分区**: 按卡号hash分区，保证同卡号交易在同一分片
-2. **全局统计量**: 实体频率、卡号聚合统计在分区前计算
-3. **并行处理**: 多进程独立构建子图和特征
-4. **结果合并**: 归并排序，保持原始顺序
-
-### 硬件加速器支持
-
-| 硬件 | 检测命令 | 加速方式 |
-|------|---------|----------|
-| CPU | `--check-hardware` | 多进程分布式 |
-| CUDA GPU | `--check-hardware` | CuPy |
-| Ascend NPU | `--check-npu` | 优化CPU实现/原生CANN |
-
-Ascend NPU检测逻辑：
-1. 检查`ASCEND_HOME_PATH`环境变量
-2. 检查`LD_LIBRARY_PATH`中的cann路径
-3. 检查torch后端是否为Ascend
-4. 尝试导入`acl`模块
+| 硬件 | 安装 | 说明 |
+|------|------|------|
+| Ascend NPU | `pip install torch-npu` | 华为昇腾加速 |
+| CUDA GPU | `pip install cupy` | NVIDIA加速 |
 
 ---
 
