@@ -284,9 +284,9 @@ def build_features_gpu(df, tx_neighbors, card_col, entity_cols, account_features
             idx2 = df_columns.index(col2)
             vals1 = df_array[:, idx1].astype(str)
             vals2 = df_array[:, idx2].astype(str)
-            pairs = np.char.add(np.char.add(vals1, '_'), vals2)
-            pair_counts = pd.Series(pairs).value_counts().to_dict()
-            features[f'{col1}_{col2}_pair_freq'] = np.array([pair_counts.get(p, 0) for p in pairs])
+            pair_key = np.array([v1 + '_' + v2 for v1, v2 in zip(vals1, vals2)], dtype=object)
+            pair_counts = pd.Series(pair_key).value_counts().to_dict()
+            features[f'{col1}_{col2}_pair_freq'] = np.array([pair_counts.get(p, 0) for p in pair_key])
             features[f'{col1}_{col2}_pair_freq_log'] = np.log1p(features[f'{col1}_{col2}_pair_freq'])
 
     # ========== 7. 时序特征 ==========

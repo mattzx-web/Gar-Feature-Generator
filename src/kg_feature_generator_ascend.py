@@ -33,9 +33,39 @@ import sys
 import argparse
 from datetime import datetime
 import time
+import subprocess
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
+
+# 自动加载Ascend环境
+def load_ascend_env():
+    """自动加载Ascend环境变量"""
+    ascend_env_paths = [
+        '/usr/local/Ascend/ascend-toolkit/set_env.sh',
+        '/usr/local/Ascend/ascend-toolkit/latest/set_env.sh',
+    ]
+    for env_path in ascend_env_paths:
+        if os.path.exists(env_path):
+            try:
+                result = subprocess.run(
+                    ['bash', '-c', f'source {env_path} && env'],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if '=' in line:
+                            key, _, value = line.partition('=')
+                            if key.startswith('ASCEND') or key in ['LD_LIBRARY_PATH', 'PYTHONPATH', 'PATH']:
+                                os.environ.setdefault(key, value)
+                    if 'ASCEND_HOME_PATH' not in os.environ:
+                        for line in result.stdout.split('\n'):
+                            if line.startswith('ASCEND_HOME_PATH='):
+                                os.environ['ASCEND_HOME_PATH'] = line.split('=', 1)[1]
+                                break
+                    break
+            except:
+                pass
 
 # 默认配置
 DEFAULT_CARD_COL = 'card_id'
@@ -52,6 +82,9 @@ def check_ascend_npu():
     Returns:
         (available, device_info): (是否可用, 设备信息字典)
     """
+    # 先尝试自动加载Ascend环境
+    load_ascend_env()
+
     device_info = {
         'available': False,
         'device_count': 0,
@@ -329,9 +362,9 @@ def build_features_batch(df, tx_neighbors, global_stats, entity_cols, card_col,
                 continue
             vals1 = df[col1].astype(str).values
             vals2 = df[col2].astype(str).values
-            pairs = np.char.add(np.char.add(vals1, '_'), vals2)
-            pair_counts = pd.Series(pairs).value_counts().to_dict()
-            features[f'{col1}_{col2}_pair_freq'] = np.array([pair_counts.get(p, 0) for p in pairs], dtype=np.float32)
+            pair_key = np.array([v1 + '_' + v2 for v1, v2 in zip(vals1, vals2)], dtype=object)
+            pair_counts = pd.Series(pair_key).value_counts().to_dict()
+            features[f'{col1}_{col2}_pair_freq'] = np.array([pair_counts.get(p, 0) for p in pair_key], dtype=np.float32)
             features[f'{col1}_{col2}_pair_freq_log'] = np.log1p(features[f'{col1}_{col2}_pair_freq']).astype(np.float32)
 
     # ========== 7. 时序特征 ==========

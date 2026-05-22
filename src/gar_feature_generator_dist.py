@@ -176,9 +176,9 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
                 continue
             vals1 = df[col1].astype(str).values
             vals2 = df[col2].astype(str).values
-            pairs = np.char.add(np.char.add(vals1, '_'), vals2)
-            pair_counts = pd.Series(pairs).value_counts().to_dict()
-            features[f'{col1}_{col2}_pair_freq'] = np.array([pair_counts.get(p, 0) for p in pairs], dtype=np.float32)
+            pair_key = np.array([v1 + '_' + v2 for v1, v2 in zip(vals1, vals2)], dtype=object)
+            pair_counts = pd.Series(pair_key).value_counts().to_dict()
+            features[f'{col1}_{col2}_pair_freq'] = np.array([pair_counts.get(p, 0) for p in pair_key], dtype=np.float32)
             features[f'{col1}_{col2}_pair_freq_log'] = np.log1p(features[f'{col1}_{col2}_pair_freq']).astype(np.float32)
 
     # ========== 7. 时序特征 ==========
