@@ -194,20 +194,30 @@ Gar-Feature-Generator/
 
 ## 加速选项
 
-对于大规模数据，可使用NPU或分布式加速：
+对于大规模数据，可使用NPU或分布式加速。
+
+### 性能测试（Ascend 910B NPU服务器，100K记录）
+
+| 实现 | 100K耗时 | 吞吐量 | 适用场景 |
+|------|----------|--------|----------|
+| **Sparse Dict** | 35秒 | 3724 rec/s | 生产环境（推荐） |
+| CSR向量化 | 139秒 | 721 rec/s | 理论研究 |
+| torch_npu | 556秒 | 185 rec/s | 超大规模(>1000万) |
+| 分布式 | - | - | 亿级数据 |
+
+**结论**：稀疏dict实现对于1000万以下数据最优。torch_npu版本因设备管理开销大，不适合中规模数据。
+
+### 使用方式
 
 ```bash
-# Ascend NPU
-python src/gar_feature_generator_ascend.py \
-    --data large_data.csv \
-    --card-col card_id \
-    --mode npu
+# CPU模式
+python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode cpu
 
-# 分布式
-python src/gar_feature_generator_dist.py \
-    --data large_data.csv \
-    --card-col card_id \
-    --workers 16
+# NPU模式（自动检测Ascend环境）
+python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode npu
+
+# 分布式（多进程）
+python src/gar_feature_generator_dist.py --data data.csv --card-col card_id --workers 16
 ```
 
 ---
