@@ -239,25 +239,66 @@ Gar-Feature-Generator/
 ├── requirements.txt
 ├── setup.py
 ├── src/
-│   ├── gar_feature_generator.py      # GAR-Inspired特征生成器
-│   ├── gar_feature_generator.py      # 通用GAR特征生成器（白样本模式）
-│   ├── kg_brute_force_generator.py   # KG Brute Force特征生成器
-│   ├── kg_feature_generator.py       # 通用KG特征生成器（白样本模式）
-│   ├── train_classifier.py           # 独立模型训练器
-│   └── feature_utils.py               # 公共工具
+│   ├── feature_generator.py              # 统一入口（自动选择CPU/分布式模式）
+│   ├── gar_feature_generator.py          # GAR-Inspired特征生成器
+│   ├── gar_feature_generator_gpu.py       # GPU加速版GAR
+│   ├── kg_brute_force_generator.py       # KG Brute Force特征生成器
+│   ├── kg_feature_generator.py           # 通用KG特征生成器（白样本模式）
+│   ├── kg_feature_generator_dist.py      # 分布式KG特征生成器
+│   ├── kg_feature_generator_gpu.py       # GPU加速版KG
+│   ├── train_classifier.py               # 独立模型训练器
+│   └── feature_utils.py                  # 公共工具
 ├── docs/
 │   ├── ALGORITHM_DETAILS.md
 │   └── PAPER_REFERENCES.md
-└── outputs/                           # 实验结果输出
+└── outputs/                               # 实验结果输出
 ```
 
 ---
 
 ## 性能说明
 
-- 590K数据集在单核CPU上约需15-20分钟
-- 内存需求约4-8GB
-- 可通过减少`--seeds`数量加速实验
+| 数据规模 | 推荐模式 | 预估时间 | 内存需求 |
+|----------|---------|----------|----------|
+| < 50万 | CPU | 5-10分钟 | 4-8GB |
+| 50万-1000万 | 分布式(8 workers) | 10-30分钟 | 8-16GB |
+| 1000万-1亿 | 分布式(16+ workers) | 30-120分钟 | 16-32GB |
+| > 1亿 | GPU/分布式 | 视硬件而定 | 32GB+ |
+
+### 大规模数据处理模式
+
+```bash
+# 分布式模式（千万级数据）
+python src/feature_generator.py --data /path/to/large_data.csv \
+                                 --card-col card_id \
+                                 --mode distributed \
+                                 --workers 16 \
+                                 --output-csv ./features.csv
+
+# 统一入口（自动选择模式）
+python src/feature_generator.py --data /path/to/data.csv \
+                                 --card-col card_id \
+                                 --output-csv ./features.csv
+
+# 多GPU（需要cupy）
+python src/kg_feature_generator_gpu.py --data /path/to/data.csv \
+                                        --card-col card_id \
+                                        --gpus 0,1,2,3 \
+                                        --output-csv ./features.csv
+```
+
+### 分布式架构设计
+
+1. **数据分区**: 按卡号hash分区，保证同卡号交易在同一分片
+2. **全局统计量**: 实体频率、卡号聚合统计在分区前计算
+3. **并行处理**: 多进程独立构建子图和特征
+4. **结果合并**: 归并排序，保持原始顺序
+
+### GPU加速设计
+
+- 使用CuPy进行GPU加速（图构建、特征计算）
+- 自动检测GPU可用性和内存
+- 适合数据量在显存容纳范围内的场景
 
 ---
 
