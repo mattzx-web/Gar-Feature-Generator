@@ -17,12 +17,40 @@
 
 ## 原始算法论文
 
-**Graph Association Rules (GAR)**
-> 核心思想：利用实体之间的图结构关系，计算欺诈率作为特征。
->
-> - Entity Fraud Rates: 单实体欺诈率
-> - Pair Fraud Rates: 实体对欺诈率
-> - Neighbor Fraud Rate: 1跳邻居欺诈率均值
+### Graph Association Rules: A New Approach for Knowledge Discovery in Large Graphs
+
+**论文来源**: IEEE Transactions on Knowledge and Data Engineering
+
+**核心思想**: 利用图结构发现实体之间的关联规则，将欺诈率作为弱监督信号生成特征。
+
+**核心概念**:
+
+| 概念 | 说明 |
+|------|------|
+| **Graph Pattern** | 图中的节点和边模式，描述实体之间的关系结构 |
+| **GAR Definition** | GAR φ = Q[x̄](X → p0)，表示"如果满足前置条件X，则结论p0成立" |
+| **Support** | 规则在图中出现的频率 |
+| **Confidence** | 规则的可靠性（条件成立时结论成立的比例） |
+
+**GAR形式化定义**:
+```
+GAR φ = Q[x̄](X → p0)
+
+其中:
+- Q[x̄]: graph pattern（图模式，如 user(x) ∧ colleague(x, x') ∧ friend(x', y)）
+- X: precondition（前置条件，多个predicates）
+- p0: consequence predicate（结果谓词）
+
+示例:
+前置条件 X = {colleague(x, x'), friend(x', y)}
+结论 p0 = follow(x, y)
+含义: 如果x和x'是同事，且x'关注y，则x也关注y
+```
+
+**本项目实现**: 将GAR思想应用于金融反欺诈，将欺诈率视为图关联规则的输出：
+- **Entity Fraud Rate**: 单实体欺诈率（如 card1=X 的欺诈率）
+- **Pair Fraud Rate**: 实体对欺诈率（如 card1=X 且 addr1=Y 的欺诈率）
+- **Neighbor Fraud Rate**: 1跳邻居欺诈率均值
 
 ---
 
