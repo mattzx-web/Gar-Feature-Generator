@@ -98,11 +98,11 @@ def build_graph(df, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THRESHOLD):
         groups = df.groupby(col).indices
         for val, idx_list in groups.items():
             if 1 < len(idx_list) < neighbor_threshold:
-                for i in idx_list:
-                    tx_neighbors[i].update(idx_list)
+                for idx in idx_list:
+                    tx_neighbors[idx].update(idx_list)
 
-    for tx in tx_neighbors:
-        tx_neighbors[tx].discard(tx)
+    for idx in tx_neighbors:
+        tx_neighbors[idx].discard(idx)
 
     n_with_neigh = sum(1 for tx in tx_neighbors if len(tx_neighbors[tx]) > 0)
     print(f"[INFO] Nodes with neighbors: {n_with_neigh}/{n} ({100*n_with_neigh/n:.1f}%)", flush=True)
@@ -177,7 +177,8 @@ def build_gar_features(df, tx_neighbors, card_col, entity_cols, account_features
 
         # 卡号度数（图特征）
         card_degree_map = df.groupby(card_col).apply(
-            lambda x: np.mean([len(tx_neighbors.get(idx, set())) for idx in x.index])
+            lambda x: np.mean([len(tx_neighbors.get(idx, set())) for idx in x.index]),
+            include_groups=False
         ).to_dict()
         features['card_avg_degree'] = df[card_col].map(card_degree_map).fillna(0).values
 
@@ -264,22 +265,18 @@ def build_gar_features(df, tx_neighbors, card_col, entity_cols, account_features
 
     if timestamp_col:
         try:
-            if df[timestamp_col].dtype == 'object':
-                df['_ts'] = pd.to_datetime(df[timestamp_col], errors='coerce')
-            else:
-                df['_ts'] = pd.to_datetime(df[timestamp_col], unit='s', errors='coerce')
+            ts = pd.to_datetime(df[timestamp_col], errors='coerce')
+            if not ts.isna().all():
+                # 小时
+                features['trans_hour'] = ts.dt.hour.fillna(12).values
+                features['trans_dayofweek'] = ts.dt.dayofweek.fillna(0).values
 
-            # 小时
-            features['trans_hour'] = df['_ts'].dt.hour.fillna(12).values
-            features['trans_dayofweek'] = df['_ts'].dt.dayofweek.fillna(0).values
-
-            # 与卡号上一笔交易的时间差
-            if card_col in df.columns and timestamp_col in df.columns:
-                df_sorted = df.sort_values([card_col, timestamp_col])
-                time_diff = df_sorted.groupby(card_col)[timestamp_col].diff().fillna(0)
-                # 按原始索引映射回去
-                time_diff_map = time_diff.to_dict()
-                features['time_diff_prev'] = df.index.map(time_diff_map).fillna(0).values
+                # 与卡号上一笔交易的时间差（秒）
+                df_sorted = df.copy()
+                df_sorted['_ts'] = ts
+                df_sorted = df_sorted.sort_values([card_col, timestamp_col])
+                time_diff = df_sorted.groupby(card_col)['_ts'].diff().dt.total_seconds().fillna(0)
+                features['time_diff_prev'] = df.index.map(time_diff.to_dict()).fillna(0).values
         except Exception as e:
             print(f"[WARN] Failed to extract temporal features: {e}", flush=True)
 
