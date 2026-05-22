@@ -6,7 +6,7 @@ KG Brute Force Feature Generator
 - 从原始CSV文件加载交易数据
 - 构建实体图结构 (card1, card2, card3, card4, addr1等)
 - 生成枚举式图特征 (度/计数/VCD统计/配对计数等)
-- 输出增强特征集用于下游分类器
+- 导出增强特征集为CSV文件，或直接训练分类器
 
 作者: Matt
 日期: 2026-05
@@ -31,26 +31,16 @@ sys.stdout.reconfigure(line_buffering=True)
 # 默认配置
 DEFAULT_ENTITY_COLS = ['card1', 'card2', 'card3', 'card4', 'addr1', 'addr2',
                        'P_emaildomain', 'R_emaildomain', 'DeviceType', 'DeviceInfo']
-DEFAULT_NEIGHBOR_THRESHOLD = 100  # 邻居节点数量上限（避免过多邻居）
-DEFAULT_TRAIN_RATIO = 0.7         # 训练集比例
-DEFAULT_N_ESTIMATORS = 200        # GBDT树数量
-DEFAULT_MAX_DEPTH = 6             # GBDT深度
+DEFAULT_NEIGHBOR_THRESHOLD = 100
+DEFAULT_TRAIN_RATIO = 0.7
+DEFAULT_N_ESTIMATORS = 200
+DEFAULT_MAX_DEPTH = 6
 
 
 def load_and_preprocess_data(data_dir, entity_cols):
-    """
-    加载并预处理数据
-
-    Args:
-        data_dir: 数据目录路径
-        entity_cols: 实体列名列表
-
-    Returns:
-        train_data, test_data, y_train, y_test, train_idx, test_idx
-    """
+    """加载并预处理数据"""
     print(f"[INFO] Loading data from {data_dir}...", flush=True)
 
-    # 加载交易数据和身份数据
     train_trans = pd.read_csv(f"{data_dir}/train_transaction.csv")
     train_identity = pd.read_csv(f"{data_dir}/train_identity.csv")
     train = train_trans.merge(train_identity, on='TransactionID', how='left')
@@ -59,7 +49,6 @@ def load_and_preprocess_data(data_dir, entity_cols):
     n_full = len(train)
     print(f"[INFO] Full dataset: {n_full}", flush=True)
 
-    # 实体列编码
     for col in entity_cols:
         if col in train.columns:
             train[col] = train[col].fillna(-1)
@@ -70,7 +59,6 @@ def load_and_preprocess_data(data_dir, entity_cols):
     n = len(train)
     n_train = int(DEFAULT_TRAIN_RATIO * n)
 
-    # 随机划分训练/测试集
     indices = np.arange(n)
     np.random.shuffle(indices)
     train_indices = indices[:n_train]
@@ -89,28 +77,9 @@ def load_and_preprocess_data(data_dir, entity_cols):
 
 
 def build_graph(train_data, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THRESHOLD):
-    """
-    构建交易图结构
-
-    Args:
-        train_data: 训练数据DataFrame
-        entity_cols: 实体列名列表
-        neighbor_threshold: 每个实体组合的邻居数量上限
-
-    Returns:
-        tx_neighbors: 交易ID到邻居集合的映射
-        tx_2hop_neighbors: 2跳邻居映射
-    """
+    """构建交易图结构"""
     print(f"[INFO] Building graph...", flush=True)
 
-    # Entity → Transaction mapping
-    entity_to_tx = defaultdict(list)
-    for col in entity_cols:
-        if col in train_data.columns:
-            for i, val in enumerate(train_data[col].values):
-                entity_to_tx[(col, val)].append(i)
-
-    # Build 1-hop neighbors
     tx_neighbors = defaultdict(set)
     for col in entity_cols:
         if col not in train_data.columns:
@@ -137,18 +106,9 @@ def build_graph(train_data, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THR
     return tx_neighbors, tx_2hop_neighbors
 
 
-def build_features(df, tx_neighbors, tx_2hop_neighbors, train_data, is_train=True):
+def build_kg_features(df, tx_neighbors, tx_2hop_neighbors, train_data, is_train=True):
     """
     构建KG Brute Force特征
-
-    Features:
-        1. Entity degree features (实体度特征)
-        2. Entity count features (实体计数特征)
-        3. 1-hop neighbor features (1跳邻居特征)
-        4. 2-hop neighbor features (2跳邻居特征)
-        5. Pair combination features (配对组合特征)
-        6. V/C/D statistics (V/C/D统计特征)
-        7. TransactionAmt features
 
     Args:
         df: 输入数据（训练或测试）
@@ -158,12 +118,12 @@ def build_features(df, tx_neighbors, tx_2hop_neighbors, train_data, is_train=Tru
         is_train: 是否为训练集
 
     Returns:
-        features: 特征DataFrame
+        features: 特征字典
     """
     features = {}
 
     # 1. Entity degree features
-    for col in DEFAULT_ENTITY_COLS[:5]:  # card1-card4, addr1
+    for col in DEFAULT_ENTITY_COLS[:5]:
         if col not in df.columns:
             continue
         degrees = []
@@ -244,19 +204,56 @@ def build_features(df, tx_neighbors, tx_2hop_neighbors, train_data, is_train=Tru
     features['TransactionAmt'] = df['TransactionAmt'].fillna(0).values
     features['TransactionAmt_log'] = np.log1p(df['TransactionAmt'].fillna(0).values)
 
-    return pd.DataFrame(features)
+    return features
 
 
-def train_and_evaluate(X_train, y_train, X_test, y_test, seed=42):
+def export_features_to_csv(train_feat, test_feat, feature_names, y_train, y_test,
+                            train_idx, test_idx, output_path):
     """
-    训练GBDT模型并评估
+    将特征导出为CSV文件
+
+    Args:
+        train_feat, test_feat: 训练/测试特征字典
+        feature_names: 特征名列表
+        y_train, y_test: 标签
+        train_idx, test_idx: 索引
+        output_path: 输出路径
+    """
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+
+    # 构建训练集DataFrame
+    train_df = pd.DataFrame({name: train_feat[name] for name in feature_names})
+    train_df['isFraud'] = y_train
+    train_df['split'] = 'train'
+    train_df['original_idx'] = train_idx
+
+    # 构建测试集DataFrame
+    test_df = pd.DataFrame({name: test_feat[name] for name in feature_names})
+    test_df['isFraud'] = y_test
+    test_df['split'] = 'test'
+    test_df['original_idx'] = test_idx
+
+    # 合并
+    df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+
+    df.to_csv(output_path, index=False)
+    print(f"[INFO] Features exported to {output_path}", flush=True)
+    print(f"[INFO] Shape: {df.shape} (train: {len(train_df)}, test: {len(test_df)})", flush=True)
+
+    return output_path
+
+
+def train_kg_classifier(X_train, y_train, X_test, y_test, feature_names, seed=42):
+    """
+    训练KG分类器
 
     Args:
         X_train, y_train, X_test, y_test: 训练/测试数据
+        feature_names: 特征名列表
         seed: 随机种子
 
     Returns:
-        results: 包含各模型AUC的字典
+        results: 包含AUC和特征重要性的字典
     """
     results = {}
 
@@ -272,21 +269,13 @@ def train_and_evaluate(X_train, y_train, X_test, y_test, seed=42):
     results['kg_brute_force'] = {
         'train_auc': float(roc_auc_score(y_train, train_proba)),
         'test_auc': float(roc_auc_score(y_test, test_proba)),
-        'feature_importance': list(zip(
-            [f'f{i}' for i in range(X_train.shape[1])],
-            gb_full.feature_importances_.tolist()
-        ))
+        'feature_importance': list(zip(feature_names, gb_full.feature_importances_.tolist()))
     }
 
-    # Without neighbor fraud rate (ablation)
-    # Note: KG Brute Force doesn't have neigh_fraud_rate, this is for consistency
-
     # Baseline
-    gb_base = GradientBoostingClassifier(
-        n_estimators=100, max_depth=4, learning_rate=0.1,
-        subsample=0.8, random_state=seed
-    )
-    gb_base.fit(X_train[:, :2], y_train)  # Just TransactionAmt and log
+    gb_base = GradientBoostingClassifier(n_estimators=100, max_depth=4, learning_rate=0.1,
+                                        subsample=0.8, random_state=seed)
+    gb_base.fit(X_train[:, :2], y_train)
     results['baseline'] = {
         'test_auc': float(roc_auc_score(y_test, gb_base.predict_proba(X_test[:, :2])[:, 1]))
     }
@@ -294,20 +283,10 @@ def train_and_evaluate(X_train, y_train, X_test, y_test, seed=42):
     return results
 
 
-def run_experiment(data_dir, seed=42, output_dir='./outputs'):
-    """
-    运行完整的KG Brute Force特征实验
-
-    Args:
-        data_dir: IEEE-CIS数据集根目录
-        seed: 随机种子
-        output_dir: 输出目录
-
-    Returns:
-        results: 实验结果字典
-    """
+def run_full_experiment(data_dir, seed=42, output_dir='./outputs'):
+    """运行完整流程：特征生成 + 模型训练"""
     np.random.seed(seed)
-    print(f"\n[Seed {seed}] Starting...", flush=True)
+    print(f"\n[Seed {seed}] Starting KG Brute Force experiment...", flush=True)
 
     # 1. 加载数据
     train_data, test_data, y_train, y_test, train_indices, test_indices = load_and_preprocess_data(
@@ -318,27 +297,29 @@ def run_experiment(data_dir, seed=42, output_dir='./outputs'):
     tx_neighbors, tx_2hop_neighbors = build_graph(train_data, DEFAULT_ENTITY_COLS)
 
     # 3. 构建特征
-    train_features = build_features(train_data, tx_neighbors, tx_2hop_neighbors, train_data, is_train=True)
-    test_features = build_features(test_data, tx_neighbors, tx_2hop_neighbors, train_data, is_train=False)
+    train_features = build_kg_features(train_data, tx_neighbors, tx_2hop_neighbors, train_data, is_train=True)
+    test_features = build_kg_features(test_data, tx_neighbors, tx_2hop_neighbors, train_data, is_train=False)
 
-    train_features = train_features.fillna(0).replace([np.inf, -np.inf], 0)
-    test_features = test_features.fillna(0).replace([np.inf, -np.inf], 0)
+    train_features = pd.DataFrame(train_features).fillna(0).replace([np.inf, -np.inf], 0)
+    test_features = pd.DataFrame(test_features).fillna(0).replace([np.inf, -np.inf], 0)
 
-    print(f"[Seed {seed}] Features: {train_features.shape[1]}", flush=True)
+    feature_names = list(train_features.columns)
+    print(f"[Seed {seed}] KG Features: {len(feature_names)} dimensions", flush=True)
 
-    # 4. 训练和评估
+    # 4. 转换为numpy数组
     X_train = train_features.values
     X_test = test_features.values
 
-    results = train_and_evaluate(X_train, y_train, X_test, y_test, seed)
+    # 5. 训练和评估
+    results = train_kg_classifier(X_train, y_train, X_test, y_test, feature_names, seed)
 
     print(f"[Seed {seed}] KG Brute Force: Train={results['kg_brute_force']['train_auc']:.4f}, "
           f"Test={results['kg_brute_force']['test_auc']:.4f}", flush=True)
     print(f"[Seed {seed}] Baseline: {results['baseline']['test_auc']:.4f}", flush=True)
 
-    results['feature_names'] = list(train_features.columns)
+    results['feature_names'] = feature_names
 
-    return results
+    return results, train_features, test_features, train_indices, test_indices
 
 
 def main():
@@ -347,29 +328,41 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # 使用默认数据路径运行
-  python src/kg_brute_force_generator.py --data-dir /path/to/ieee-fraud-detection
+  # 完整流程（特征生成 + 模型训练）
+  python src/kg_brute_force_generator.py --data-dir /path/to/data
 
-  # 指定输出目录和种子
-  python src/kg_brute_force_generator.py --data-dir /path/to/ieee-fraud-detection \\
-                                         --output-dir ./results --seed 42
+  # 仅生成特征并导出CSV
+  python src/kg_brute_force_generator.py --data-dir /path/to/data \\
+                                          --export-features-only \\
+                                          --output-csv ./features/kg_train.csv
 
   # 多种子验证
-  python src/kg_brute_force_generator.py --data-dir /path/to/ieee-fraud-detection \\
-                                          --seeds 42 123 456
+  python src/kg_brute_force_generator.py --data-dir /path/to/data --seeds 42 123 456
+
+  # 导出特征后用独立脚本训练
+  python src/kg_brute_force_generator.py --data-dir /path/to/data --export-features-only --output-csv ./features.csv
+  python src/train_classifier.py --features ./features.csv --model kg
         """
     )
 
     parser.add_argument('--data-dir', type=str, required=True,
-                        help='IEEE-CIS数据集根目录（包含train_transaction.csv和train_identity.csv）')
+                        help='IEEE-CIS数据集根目录')
     parser.add_argument('--output-dir', type=str, default='./outputs',
                         help='输出目录（默认: ./outputs）')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子（默认: 42）')
     parser.add_argument('--seeds', type=int, nargs='+', default=None,
-                        help='多种子验证模式（如: --seeds 42 123 456）')
+                        help='多种子验证模式')
+    parser.add_argument('--export-features-only', action='store_true',
+                        help='仅生成特征，不训练模型')
+    parser.add_argument('--feature-only', action='store_true',
+                        help='与--export-features-only相同')
+    parser.add_argument('--output-csv', type=str, default=None,
+                        help='特征CSV输出路径')
 
     args = parser.parse_args()
+
+    export_only = args.export_features_only or args.feature_only
 
     print("="*60, flush=True)
     print("KG Brute Force Feature Generator", flush=True)
@@ -380,10 +373,15 @@ Examples:
     if args.seeds:
         # 多种子模式
         all_results = []
+        all_feature_names = None
+
         for seed in args.seeds:
-            result = run_experiment(args.data_dir, seed, args.output_dir)
+            result, train_features, test_features, train_indices, test_indices = run_full_experiment(
+                args.data_dir, seed, args.output_dir
+            )
             result['seed'] = seed
             all_results.append(result)
+            all_feature_names = result.get('feature_names')
 
         # 聚合结果
         print("\n" + "="*60, flush=True)
@@ -403,7 +401,7 @@ Examples:
             'experiment': 'KG Brute Force Feature Generator',
             'seeds': args.seeds,
             'aggregated': {},
-            'feature_names': all_results[0].get('feature_names', [])
+            'feature_names': all_feature_names
         }
 
         for model in ['kg_brute_force', 'baseline']:
@@ -425,11 +423,42 @@ Examples:
         print(f"\nResults saved to {out_file}", flush=True)
     else:
         # 单种子模式
-        result = run_experiment(args.data_dir, args.seed, args.output_dir)
+        # 1. 加载数据
+        train_data, test_data, y_train, y_test, train_indices, test_indices = load_and_preprocess_data(
+            args.data_dir, DEFAULT_ENTITY_COLS
+        )
 
-        print(f"\nKG Brute Force: Train={result['kg_brute_force']['train_auc']:.4f}, "
-              f"Test={result['kg_brute_force']['test_auc']:.4f}", flush=True)
-        print(f"Baseline: {result['baseline']['test_auc']:.4f}", flush=True)
+        # 2. 构建图
+        tx_neighbors, tx_2hop_neighbors = build_graph(train_data, DEFAULT_ENTITY_COLS)
+
+        # 3. 构建特征
+        train_feat = build_kg_features(train_data, tx_neighbors, tx_2hop_neighbors, train_data, is_train=True)
+        test_feat = build_kg_features(test_data, tx_neighbors, tx_2hop_neighbors, train_data, is_train=False)
+
+        train_feat = pd.DataFrame(train_feat).fillna(0).replace([np.inf, -np.inf], 0)
+        test_feat = pd.DataFrame(test_feat).fillna(0).replace([np.inf, -np.inf], 0)
+
+        feature_names = list(train_feat.columns)
+
+        if export_only:
+            # 仅导出特征
+            if args.output_csv:
+                export_features_to_csv(
+                    train_feat.to_dict('list'), test_feat.to_dict('list'),
+                    feature_names, y_train, y_test, train_indices, test_indices, args.output_csv
+                )
+            else:
+                print("[ERROR] --output-csv is required when using --export-features-only", flush=True)
+        else:
+            # 完整流程
+            X_train = train_feat.values
+            X_test = test_feat.values
+
+            results = train_kg_classifier(X_train, y_train, X_test, y_test, feature_names, args.seed)
+
+            print(f"\nKG Brute Force: Train={results['kg_brute_force']['train_auc']:.4f}, "
+                  f"Test={results['kg_brute_force']['test_auc']:.4f}", flush=True)
+            print(f"Baseline: {results['baseline']['test_auc']:.4f}", flush=True)
 
     print(f"\nTotal time: {(time.time()-start_time)/60:.1f} minutes", flush=True)
 

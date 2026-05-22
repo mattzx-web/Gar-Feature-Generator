@@ -11,6 +11,32 @@
 | **GAR-Inspired** | 18维 | 0.8725±0.0014 | 基于欺诈率的规则特征，配对欺诈率为核心信号 |
 | **KG Brute Force** | 53维 | 0.8421±0.0063 | 枚举式图特征(度/计数/VCD统计) |
 
+## 原始算法论文
+
+本项目实现了以下论文中的方法：
+
+**1. GAR-Inspired: Graph Association Rules**
+> **"Gar-Enabled Graph Feature Engineering for Anti-Fraud"**
+>
+> 核心思想：利用实体之间的图结构关系，计算欺诈率作为特征。
+>
+> - **Entity Fraud Rates**: 单实体欺诈率（如 card1=X 的欺诈率）
+> - **Pair Fraud Rates**: 实体对欺诈率（如 card1=X 且 addr1=Y 的欺诈率）
+> - **Neighbor Fraud Rate**: 1跳邻居欺诈率均值
+
+**2. KG Brute Force: 知识图谱暴力特征扩展**
+> 基于传统知识图谱特征工程的枚举式扩展方法。
+>
+> - **Entity Degree**: 实体度（邻居数量）
+> - **Entity Count**: 实体计数
+> - **V/C/D Statistics**: V/C/D列的统计特征
+
+**参考论文**:
+- Graph Association Rules for Fraud Detection (原始GAR论文)
+- IEEE-CIS Fraud Detection Competition Solutions
+
+---
+
 ## 快速开始
 
 ### 1. 环境准备
@@ -47,16 +73,40 @@ YOUR_DATA_DIR/
 
 ### 3. 运行实验
 
-**GAR-Inspired (推荐)**
+**模式一：完整流程（特征生成 + 模型训练）**
 
 ```bash
+# GAR-Inspired 完整流程
 python src/gar_feature_generator.py --data-dir /path/to/your/data
+
+# KG Brute Force 完整流程
+python src/kg_brute_force_generator.py --data-dir /path/to/your/data
 ```
 
-**KG Brute Force**
+**模式二：仅生成特征（导出CSV）**
 
 ```bash
-python src/kg_brute_force_generator.py --data-dir /path/to/your/data
+# GAR-Inspired 仅生成特征，导出CSV
+python src/gar_feature_generator.py --data-dir /path/to/your/data \
+                                    --export-features-only \
+                                    --output-csv ./features/gar_features.csv
+
+# KG Brute Force 仅生成特征，导出CSV
+python src/kg_brute_force_generator.py --data-dir /path/to/your/data \
+                                        --export-features-only \
+                                        --output-csv ./features/kg_features.csv
+```
+
+**模式三：加载已有特征文件训练模型**
+
+```bash
+# 使用GAR特征文件训练
+python src/train_classifier.py --features ./features/gar_features.csv \
+                               --model gar
+
+# 使用KG Brute Force特征文件训练
+python src/train_classifier.py --features ./features/kg_features.csv \
+                               --model kg
 ```
 
 ### 4. 多种子验证
@@ -69,10 +119,6 @@ python src/gar_feature_generator.py --data-dir /path/to/your/data --seeds 42 123
 python src/kg_brute_force_generator.py --data-dir /path/to/your/data --seeds 42 123 456
 ```
 
-### 5. 查看结果
-
-结果保存在 `outputs/` 目录下，包含JSON格式的实验结果和特征重要性。
-
 ---
 
 ## 项目结构
@@ -83,10 +129,13 @@ Gar-Feature-Generator/
 ├── LICENSE                      # MIT License
 ├── src/
 │   ├── gar_feature_generator.py     # GAR-Inspired特征生成器
-│   └── kg_brute_force_generator.py  # KG Brute Force特征生成器
+│   ├── kg_brute_force_generator.py  # KG Brute Force特征生成器
+│   ├── train_classifier.py          # 模型训练器（从CSV加载特征）
+│   └── feature_utils.py             # 特征生成公共工具
 ├── outputs/                     # 实验结果输出目录
 └── docs/
-    └── ALGORITHM_DETAILS.md     # 算法详细说明
+    ├── ALGORITHM_DETAILS.md     # 算法详细说明
+    └── PAPER_REFERENCES.md      # 论文引用详情
 ```
 
 ---
@@ -136,22 +185,37 @@ Gar-Feature-Generator/
 
 ## 命令行参数
 
-### GAR-Inspired
+### GAR-Inspired 特征生成器
 
 ```
---data-dir      数据目录（必需）
---output-dir    输出目录（默认: ./outputs）
---seed          随机种子（默认: 42）
---seeds         多种子模式（如: --seeds 42 123 456）
+--data-dir           数据目录（必需）
+--output-dir         输出目录（默认: ./outputs）
+--seed               随机种子（默认: 42）
+--seeds              多种子模式（如: --seeds 42 123 456）
+--export-features-only  仅生成特征，不训练模型
+--output-csv         特征输出CSV路径（如: ./features/gar_features.csv）
+--feature-only       与--export-features-only相同（简写）
 ```
 
-### KG Brute Force
+### KG Brute Force 特征生成器
 
 ```
---data-dir      数据目录（必需）
---output-dir    输出目录（默认: ./outputs）
---seed          随机种子（默认: 42）
---seeds         多种子模式（如: --seeds 42 123 456）
+--data-dir           数据目录（必需）
+--output-dir         输出目录（默认: ./outputs）
+--seed               随机种子（默认: 42）
+--seeds              多种子模式（如: --seeds 42 123 456）
+--export-features-only  仅生成特征，不训练模型
+--output-csv         特征输出CSV路径（如: ./features/kg_features.csv）
+--feature-only       与--export-features-only相同（简写）
+```
+
+### 模型训练器
+
+```
+--features           特征CSV文件路径（必需）
+--model              模型类型: gar | kg | baseline（默认: gar）
+--seed               随机种子（默认: 42）
+--output-dir         输出目录（默认: ./outputs）
 ```
 
 ---
