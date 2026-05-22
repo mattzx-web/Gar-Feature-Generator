@@ -1,22 +1,32 @@
 """
-GAR-Inspired Feature Generator
-基于图关联规则的欺诈检测特征工程方法
+通用GAR特征生成器
 
-功能:
-- 从原始CSV文件加载交易数据
-- 构建实体图结构 (card1, card2, addr1, P_emaildomain等)
-- 计算欺诈率特征 (Entity Fraud Rates, Pair Fraud Rates, Neighbor Fraud Rate)
-- 导出增强特征集为CSV文件，或直接训练分类器
+支持白样本（无标签）数据，支持账户级和交易级特征。
+基于图关联规则的欺诈率特征工程。
 
-作者: Matt
-日期: 2026-05
+数据格式:
+- 每个CSV包含交易记录
+- 账户级特征（如卡等级）每个账号重复
+- 交易级特征（如交易金额）每条记录不同
+
+用法:
+    # 白样本特征生成
+    python src/gar_feature_generator.py --data /path/to/data.csv \\
+                                        --card-col card_id \\
+                                        --export-features-only \\
+                                        --output-csv ./features/gar_features.csv
+
+    # 指定账户级和交易级特征列
+    python src/gar_feature_generator.py --data /path/to/data.csv \\
+                                        --card-col card_id \\
+                                        --account-features card_level,issuing_bank \\
+                                        --transaction-features amount,balance,timestamp \\
+                                        --entity-cols card_id,merchant_id,device_type
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.metrics import roc_auc_score
 from collections import defaultdict
 import json
 import os
@@ -29,62 +39,63 @@ import time
 sys.stdout.reconfigure(line_buffering=True)
 
 # 默认配置
-DEFAULT_ENTITY_COLS = ['card1', 'card2', 'addr1', 'P_emaildomain']
+DEFAULT_CARD_COL = 'card_id'
+DEFAULT_ENTITY_COLS = ['card_id', 'merchant_id', 'device_type', 'transaction_type']
+DEFAULT_ACCOUNT_FEATURES = ['card_level', 'issuing_bank']
+DEFAULT_TRANSACTION_FEATURES = ['timestamp', 'amount', 'balance_after', 'is_frequent_contact',
+                                'transaction_channel', 'device_type', 'is_pos', 'is_cross_border']
 DEFAULT_NEIGHBOR_THRESHOLD = 300
-DEFAULT_TRAIN_RATIO = 0.7
-DEFAULT_N_ESTIMATORS = 200
-DEFAULT_MAX_DEPTH = 6
 
 
-def load_and_preprocess_data(data_dir, entity_cols):
-    """加载并预处理数据"""
-    print(f"[INFO] Loading data from {data_dir}...", flush=True)
+def load_and_preprocess_data(data_path, card_col, entity_cols, account_features, transaction_features):
+    """
+    加载并预处理数据
+    """
+    print(f"[INFO] Loading data from {data_path}...", flush=True)
 
-    train_trans = pd.read_csv(f"{data_dir}/train_transaction.csv",
-                              usecols=['TransactionID', 'TransactionAmt', 'card1', 'card2',
-                                       'addr1', 'P_emaildomain', 'isFraud'])
-    train_identity = pd.read_csv(f"{data_dir}/train_identity.csv",
-                                 usecols=['TransactionID', 'DeviceInfo', 'DeviceType'])
-    train = train_trans.merge(train_identity, on='TransactionID', how='left')
-    del train_trans, train_identity
+    df = pd.read_csv(data_path)
+    print(f"[INFO] Loaded {len(df)} records", flush=True)
 
+    # 检测是否有标签
+    has_label = False
+    label_col = None
+    for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
+        if col in df.columns:
+            has_label = True
+            label_col = col
+            print(f"[INFO] Found label column: {label_col}", flush=True)
+            break
+
+    # 实体列编码
     for col in entity_cols:
-        if col in train.columns:
-            train[col] = train[col].fillna(-1)
-            if train[col].dtype == 'object':
+        if col in df.columns:
+            df[col] = df[col].fillna(-1)
+            if df[col].dtype == 'object':
                 le = LabelEncoder()
-                train[col] = le.fit_transform(train[col].astype(str))
+                df[col] = le.fit_transform(df[col].astype(str))
 
-    n = len(train)
-    n_train = int(DEFAULT_TRAIN_RATIO * n)
+    # 填充特征缺失值
+    for col in account_features + transaction_features:
+        if col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].fillna('missing')
+            else:
+                df[col] = df[col].fillna(0)
 
-    indices = np.arange(n)
-    np.random.shuffle(indices)
-    train_idx = indices[:n_train]
-    test_idx = indices[n_train:]
-
-    train_data = train.iloc[train_idx].copy()
-    test_data = train.iloc[test_idx].copy()
-    del train
-
-    y_train = train_data['isFraud'].values
-    y_test = test_data['isFraud'].values
-
-    print(f"[INFO] Train: {len(train_data)}, Test: {len(test_data)}", flush=True)
-    print(f"[INFO] Fraud rates: train={y_train.mean():.4f}, test={y_test.mean():.4f}", flush=True)
-
-    return train_data, test_data, y_train, y_test, train_idx, test_idx
+    return df, card_col, entity_cols, account_features, transaction_features, has_label, label_col
 
 
-def build_graph(train_data, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THRESHOLD):
+def build_graph(df, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THRESHOLD):
     """构建交易图结构"""
     print(f"[INFO] Building graph...", flush=True)
+
+    n = len(df)
     tx_neighbors = defaultdict(set)
 
     for col in entity_cols:
-        if col not in train_data.columns:
+        if col not in df.columns:
             continue
-        groups = train_data.groupby(col).indices
+        groups = df.groupby(col).indices
         for val, idx_list in groups.items():
             if 1 < len(idx_list) < neighbor_threshold:
                 for i in idx_list:
@@ -93,239 +104,309 @@ def build_graph(train_data, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THR
     for tx in tx_neighbors:
         tx_neighbors[tx].discard(tx)
 
+    n_with_neigh = sum(1 for tx in tx_neighbors if len(tx_neighbors[tx]) > 0)
+    print(f"[INFO] Nodes with neighbors: {n_with_neigh}/{n} ({100*n_with_neigh/n:.1f}%)", flush=True)
+
     return tx_neighbors
 
 
-def build_gar_features(train_data, test_data, tx_neighbors, train_idx, y_train, entity_cols):
+def build_gar_features(df, tx_neighbors, card_col, entity_cols, account_features,
+                       transaction_features, has_label, label_col=None):
     """
-    构建GAR特征 (仅特征生成，不含模型训练)
+    构建GAR特征（通用版本）
 
-    Args:
-        train_data, test_data: 训练/测试数据
-        tx_neighbors: 图邻居映射
-        train_idx, y_train: 训练集索引和标签
-        entity_cols: 实体列
-
-    Returns:
-        train_features_dict, test_features_dict, feature_names
+    特征类型:
+    1. Transaction Features (交易级特征)
+    2. Entity Frequency (实体频率)
+    3. Card Aggregation (卡号聚合特征)
+    4. Pair Frequency (配对频率)
+    5. Neighbor Features (邻居特征)
+    6. Account Features (账户级特征)
+    7. GAR Fraud Rates (欺诈率特征 - 仅在有标签时可用)
     """
     print(f"[INFO] Building GAR features...", flush=True)
 
-    train_feat = {}
-    test_feat = {}
+    features = {}
+    n = len(df)
 
-    # 1. TransactionAmt特征
-    train_feat['TransactionAmt'] = train_data['TransactionAmt'].fillna(0).values
-    test_feat['TransactionAmt'] = test_data['TransactionAmt'].fillna(0).values
-    train_feat['TransactionAmt_log'] = np.log1p(train_data['TransactionAmt'].fillna(0).values)
-    test_feat['TransactionAmt_log'] = np.log1p(test_data['TransactionAmt'].fillna(0).values)
+    # ========== 1. 交易级特征 ==========
+    amount_col = None
+    for col in ['amount', '交易金额', 'transaction_amount', 'amt']:
+        if col in df.columns:
+            amount_col = col
+            break
 
-    # 2. degree特征
-    train_feat['degree'] = np.array([len(tx_neighbors.get(i, set())) for i in range(len(train_data))])
-    test_global_start = len(train_data)
-    test_feat['degree'] = np.array([len(tx_neighbors.get(test_global_start + i, set())) for i in range(len(test_data))])
-
-    # 3. Entity frequency特征
-    for col in entity_cols[:4]:
-        if col not in train_data.columns:
+    for col in transaction_features:
+        if col not in df.columns:
             continue
-        freq_map = train_data[col].value_counts().to_dict()
-        train_feat[f'{col}_freq'] = train_data[col].map(freq_map).fillna(0).values
-        test_feat[f'{col}_freq'] = test_data[col].map(freq_map).fillna(0).values
+        if df[col].dtype in ['int64', 'float64']:
+            features[col] = df[col].fillna(0).values
+            # 对金额类特征添加log
+            if amount_col and col == amount_col:
+                features[f'{col}_log'] = np.log1p(np.abs(df[col].fillna(0).values))
+        else:
+            le = LabelEncoder()
+            features[col] = le.fit_transform(df[col].fillna('missing').astype(str))
 
-    # 4. Entity fraud rates特征
-    for col in entity_cols[:4]:
-        if col not in train_data.columns:
+    # ========== 2. Entity Frequency特征 ==========
+    for col in entity_cols:
+        if col not in df.columns:
             continue
-        fraud_map = train_data.groupby(col)['isFraud'].mean().to_dict()
-        train_feat[f'{col}_fraud_rate'] = train_data[col].map(fraud_map).fillna(0).values
-        test_feat[f'{col}_fraud_rate'] = test_data[col].map(fraud_map).fillna(0).values
+        freq_map = df[col].value_counts().to_dict()
+        features[f'{col}_freq'] = df[col].map(freq_map).fillna(0).values
+        features[f'{col}_freq_log'] = np.log1p(features[f'{col}_freq'])
 
-    # 5. Pair fraud rates特征
-    for i, col1 in enumerate(entity_cols[:3]):
-        for col2 in entity_cols[i+1:4]:
-            if col1 not in train_data.columns or col2 not in train_data.columns:
+    # ========== 3. Card聚合特征 ==========
+    if card_col in df.columns:
+        # 卡号交易次数
+        card_counts = df[card_col].value_counts().to_dict()
+        features['card_tx_count'] = df[card_col].map(card_counts).fillna(0).values
+        features['card_tx_count_log'] = np.log1p(features['card_tx_count'])
+
+        # 卡号金额统计
+        if amount_col:
+            card_amt_mean = df.groupby(card_col)[amount_col].transform('mean')
+            card_amt_std = df.groupby(card_col)[amount_col].transform('std').fillna(0)
+            card_amt_max = df.groupby(card_col)[amount_col].transform('max')
+            features['card_amt_mean'] = card_amt_mean.fillna(0).values
+            features['card_amt_std'] = card_amt_std.fillna(0).values
+            features['card_amt_max'] = card_amt_max.fillna(0).values
+
+            # 金额与卡均值的比率
+            features['amt_to_card_mean_ratio'] = df[amount_col].fillna(0) / (card_amt_mean.fillna(1) + 1)
+
+        # 卡号度数（图特征）
+        card_degree_map = df.groupby(card_col).apply(
+            lambda x: np.mean([len(tx_neighbors.get(idx, set())) for idx in x.index])
+        ).to_dict()
+        features['card_avg_degree'] = df[card_col].map(card_degree_map).fillna(0).values
+
+    # ========== 4. Pair Frequency特征 ==========
+    for i, col1 in enumerate(entity_cols[:4]):
+        for col2 in entity_cols[i+1:5]:
+            if col1 not in df.columns or col2 not in df.columns:
                 continue
-            train_pair = train_data[col1].astype(str) + '_' + train_data[col2].astype(str)
-            test_pair = test_data[col1].astype(str) + '_' + test_data[col2].astype(str)
-            pair_map = train_data.assign(_pair=train_pair).groupby('_pair')['isFraud'].mean().to_dict()
-            train_feat[f'{col1}_{col2}_pair_fraud'] = train_pair.map(pair_map).fillna(0).values
-            test_feat[f'{col1}_{col2}_pair_fraud'] = test_pair.map(pair_map).fillna(0).values
+            pairs = df[col1].astype(str) + '_' + df[col2].astype(str)
+            pair_counts = pairs.map(pairs.value_counts())
+            features[f'{col1}_{col2}_pair_freq'] = pair_counts.fillna(0).values
+            features[f'{col1}_{col2}_pair_freq_log'] = np.log1p(pair_counts.fillna(0)).values
 
-    # 6. Neighbor fraud rate特征
-    train_is_fraud = y_train
-    train_indices_set = set(train_idx)
+    # ========== 5. Neighbor特征 ==========
+    n_1hop = [len(tx_neighbors.get(i, set())) for i in range(n)]
+    features['n_1hop'] = np.array(n_1hop)
+    features['n_1hop_log'] = np.log1p(features['n_1hop'])
 
-    train_neigh_fraud = []
-    for i in range(len(train_data)):
-        neighs = tx_neighbors.get(i, set())
-        if neighs:
-            train_neigh_fraud.append(train_is_fraud[list(neighs)].mean())
+    # 邻居金额统计
+    if amount_col:
+        amt_1hop_mean = []
+        amt_1hop_std = []
+        for i in range(n):
+            neighs = tx_neighbors.get(i, set())
+            if neighs:
+                neigh_amts = df[amount_col].iloc[list(neighs)].fillna(0).values
+                amt_1hop_mean.append(np.mean(neigh_amts))
+                amt_1hop_std.append(np.std(neigh_amts) if len(neigh_amts) > 1 else 0)
+            else:
+                amt_1hop_mean.append(0)
+                amt_1hop_std.append(0)
+        features['amt_1hop_mean'] = np.array(amt_1hop_mean)
+        features['amt_1hop_std'] = np.array(amt_1hop_std)
+
+    # ========== 6. Account级特征 ==========
+    for col in account_features:
+        if col not in df.columns:
+            continue
+        if df[col].dtype == 'object':
+            le = LabelEncoder()
+            features[col] = le.fit_transform(df[col].fillna('missing').astype(str))
         else:
-            train_neigh_fraud.append(0)
-    train_feat['neigh_fraud_rate'] = np.array(train_neigh_fraud)
+            features[col] = df[col].fillna(-1).values
 
-    test_neigh_fraud = []
-    for i in range(len(test_data)):
-        global_i = test_idx[i]
-        neighs = tx_neighbors.get(global_i, set())
-        train_neighs = [n for n in neighs if n in train_indices_set]
-        if train_neighs:
-            local_neighs = [np.where(train_idx == n)[0][0] for n in train_neighs]
-            test_neigh_fraud.append(train_is_fraud[local_neighs].mean())
-        else:
-            test_neigh_fraud.append(0)
-    test_feat['neigh_fraud_rate'] = np.array(test_neigh_fraud)
+    # ========== 7. GAR Fraud Rate特征 (仅当有标签时) ==========
+    if has_label and label_col:
+        print(f"[INFO] Computing fraud rate features using label column: {label_col}", flush=True)
 
-    feature_names = list(train_feat.keys())
-    print(f"[INFO] GAR Features: {len(feature_names)} dimensions", flush=True)
+        # Entity Fraud Rates
+        for col in entity_cols:
+            if col not in df.columns:
+                continue
+            fraud_map = df.groupby(col)[label_col].mean().to_dict()
+            features[f'{col}_fraud_rate'] = df[col].map(fraud_map).fillna(0).values
 
-    return train_feat, test_feat, feature_names
+        # Pair Fraud Rates
+        for i, col1 in enumerate(entity_cols[:4]):
+            for col2 in entity_cols[i+1:5]:
+                if col1 not in df.columns or col2 not in df.columns:
+                    continue
+                pair_df = df[[col1, col2, label_col]].copy()
+                pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
+                fraud_map = pair_df.groupby('_pair')[label_col].mean().to_dict()
+                pair_values = df[col1].astype(str) + '_' + df[col2].astype(str)
+                features[f'{col1}_{col2}_pair_fraud_rate'] = pair_values.map(fraud_map).fillna(0).values
+
+        # Neighbor Fraud Rate
+        train_is_fraud = df[label_col].values
+        neigh_fraud_rates = []
+        for i in range(n):
+            neighs = tx_neighbors.get(i, set())
+            if neighs:
+                neigh_fraud_rates.append(train_is_fraud[list(neighs)].mean())
+            else:
+                neigh_fraud_rates.append(0)
+        features['neigh_fraud_rate'] = np.array(neigh_fraud_rates)
+
+    # ========== 8. 时序特征 ==========
+    timestamp_col = None
+    for col in ['timestamp', '时间戳', 'trans_time', 'transaction_time', 'trans_date']:
+        if col in df.columns:
+            timestamp_col = col
+            break
+
+    if timestamp_col:
+        try:
+            if df[timestamp_col].dtype == 'object':
+                df['_ts'] = pd.to_datetime(df[timestamp_col], errors='coerce')
+            else:
+                df['_ts'] = pd.to_datetime(df[timestamp_col], unit='s', errors='coerce')
+
+            # 小时
+            features['trans_hour'] = df['_ts'].dt.hour.fillna(12).values
+            features['trans_dayofweek'] = df['_ts'].dt.dayofweek.fillna(0).values
+
+            # 与卡号上一笔交易的时间差
+            if card_col in df.columns and timestamp_col in df.columns:
+                df_sorted = df.sort_values([card_col, timestamp_col])
+                time_diff = df_sorted.groupby(card_col)[timestamp_col].diff().fillna(0)
+                # 按原始索引映射回去
+                time_diff_map = time_diff.to_dict()
+                features['time_diff_prev'] = df.index.map(time_diff_map).fillna(0).values
+        except Exception as e:
+            print(f"[WARN] Failed to extract temporal features: {e}", flush=True)
+
+    # 清理无穷值
+    for key in features:
+        features[key] = np.nan_to_num(features[key], nan=0, posinf=0, neginf=0)
+
+    feature_names = list(features.keys())
+    print(f"[INFO] Generated {len(feature_names)} features", flush=True)
+
+    return features, feature_names
 
 
-def export_features_to_csv(train_feat, test_feat, feature_names, y_train, y_test,
-                            train_idx, test_idx, output_path):
-    """
-    将特征导出为CSV文件
-
-    Args:
-        train_feat, test_feat: 训练/测试特征字典
-        feature_names: 特征名列表
-        y_train, y_test: 标签
-        train_idx, test_idx: 索引
-        output_path: 输出路径
-    """
+def export_features_to_csv(features_dict, feature_names, output_path, original_df=None, has_label=False):
+    """导出特征到CSV"""
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
 
-    # 构建训练集DataFrame
-    train_df = pd.DataFrame({name: train_feat[name] for name in feature_names})
-    train_df['isFraud'] = y_train
-    train_df['split'] = 'train'
-    train_df['original_idx'] = train_idx
+    df_features = pd.DataFrame({name: features_dict[name] for name in feature_names})
 
-    # 构建测试集DataFrame
-    test_df = pd.DataFrame({name: test_feat[name] for name in feature_names})
-    test_df['isFraud'] = y_test
-    test_df['split'] = 'test'
-    test_df['original_idx'] = test_idx
+    # 保留关键列
+    if original_df is not None:
+        key_cols = []
+        for col in ['card_id', '卡号', 'TransactionID', 'transaction_id', 'timestamp', '时间戳']:
+            if col in original_df.columns:
+                key_cols.append(col)
 
-    # 合并
-    df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+        if key_cols:
+            df_features = pd.concat([original_df[key_cols], df_features], axis=1)
 
-    df.to_csv(output_path, index=False)
-    print(f"[INFO] Features exported to {output_path}", flush=True)
-    print(f"[INFO] Shape: {df.shape} (train: {len(train_df)}, test: {len(test_df)})", flush=True)
+    # 保留标签
+    if has_label:
+        for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
+            if col in original_df.columns:
+                df_features[col] = original_df[col].values
+                break
+
+    df_features.to_csv(output_path, index=False)
+    print(f"[INFO] Features saved to {output_path}", flush=True)
+    print(f"[INFO] Shape: {df_features.shape}", flush=True)
 
     return output_path
 
 
-def train_gar_classifier(X_train, y_train, X_test, y_test, feature_names, seed=42):
-    """
-    训练GAR分类器
+def train_classifier(features_dict, feature_names, has_label, label_col, train_ratio=0.7, seed=42):
+    """训练分类器"""
+    if not has_label:
+        print("[INFO] White sample mode - skipping model training", flush=True)
+        return None
 
-    Args:
-        X_train, y_train, X_test, y_test: 训练/测试数据
-        feature_names: 特征名列表
-        seed: 随机种子
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.metrics import roc_auc_score
 
-    Returns:
-        results: 包含AUC和特征重要性的字典
-    """
-    X_train = np.nan_to_num(X_train, nan=0, posinf=0, neginf=0)
-    X_test = np.nan_to_num(X_test, nan=0, posinf=0, neginf=0)
+    n = len(feature_names[0])
+    n_train = int(train_ratio * n)
 
-    results = {}
+    indices = np.arange(n)
+    np.random.seed(seed)
+    np.random.shuffle(indices)
+    train_idx = indices[:n_train]
+    test_idx = indices[n_train:]
 
-    # GAR Full
-    gb_full = GradientBoostingClassifier(
-        n_estimators=DEFAULT_N_ESTIMATORS, max_depth=DEFAULT_MAX_DEPTH,
-        learning_rate=0.1, subsample=0.8, random_state=seed
-    )
-    gb_full.fit(X_train, y_train)
-    train_proba = gb_full.predict_proba(X_train)[:, 1]
-    test_proba = gb_full.predict_proba(X_test)[:, 1]
-    results['gar_full'] = {
+    X = np.column_stack([features_dict[name] for name in feature_names])
+    X = np.nan_to_num(X, nan=0, posinf=0, neginf=0)
+
+    y = features_dict[label_col]
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    gb = GradientBoostingClassifier(n_estimators=200, max_depth=6, learning_rate=0.1,
+                                     subsample=0.8, random_state=seed)
+    gb.fit(X_train, y_train)
+
+    train_proba = gb.predict_proba(X_train)[:, 1]
+    test_proba = gb.predict_proba(X_test)[:, 1]
+
+    results = {
         'train_auc': float(roc_auc_score(y_train, train_proba)),
         'test_auc': float(roc_auc_score(y_test, test_proba)),
-        'feature_importance': list(zip(feature_names, gb_full.feature_importances_.tolist()))
-    }
-
-    # Baseline
-    gb_base = GradientBoostingClassifier(n_estimators=100, max_depth=4, learning_rate=0.1,
-                                        subsample=0.8, random_state=seed)
-    gb_base.fit(X_train[:, :2], y_train)
-    results['baseline'] = {
-        'test_auc': float(roc_auc_score(y_test, gb_base.predict_proba(X_test[:, :2])[:, 1]))
+        'feature_importance': list(zip(feature_names, gb.feature_importances_.tolist()))
     }
 
     return results
 
 
-def run_full_experiment(data_dir, seed=42, output_dir='./outputs'):
-    """运行完整流程：特征生成 + 模型训练"""
-    np.random.seed(seed)
-    print(f"\n[Seed {seed}] Starting GAR experiment...", flush=True)
-
-    # 1. 加载数据
-    train_data, test_data, y_train, y_test, train_idx, test_idx = load_and_preprocess_data(
-        data_dir, DEFAULT_ENTITY_COLS
-    )
-
-    # 2. 构建图
-    tx_neighbors = build_graph(train_data, DEFAULT_ENTITY_COLS)
-
-    # 3. 构建特征
-    train_feat, test_feat, feature_names = build_gar_features(
-        train_data, test_data, tx_neighbors, train_idx, y_train, DEFAULT_ENTITY_COLS
-    )
-
-    # 4. 转换为numpy数组
-    X_train = np.column_stack([train_feat[k] for k in feature_names])
-    X_test = np.column_stack([test_feat[k] for k in feature_names])
-    X_train = np.nan_to_num(X_train, nan=0, posinf=0, neginf=0)
-    X_test = np.nan_to_num(X_test, nan=0, posinf=0, neginf=0)
-
-    # 5. 训练和评估
-    results = train_gar_classifier(X_train, y_train, X_test, y_test, feature_names, seed)
-
-    print(f"[Seed {seed}] GAR Full: Train={results['gar_full']['train_auc']:.4f}, "
-          f"Test={results['gar_full']['test_auc']:.4f}", flush=True)
-    print(f"[Seed {seed}] Baseline: {results['baseline']['test_auc']:.4f}", flush=True)
-
-    return results, feature_names
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description='GAR-Inspired Feature Generator for Fraud Detection',
+        description='GAR Feature Generator for White Samples',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # 完整流程（特征生成 + 模型训练）
-  python src/gar_feature_generator.py --data-dir /path/to/data
-
-  # 仅生成特征并导出CSV
-  python src/gar_feature_generator.py --data-dir /path/to/data \\
+  # 白样本特征生成（无标签）
+  python src/gar_feature_generator.py --data /path/to/transactions.csv \\
+                                      --card-col card_id \\
                                       --export-features-only \\
-                                      --output-csv ./features/gar_train.csv
+                                      --output-csv ./features/gar_features.csv
 
-  # 多种子验证
-  python src/gar_feature_generator.py --data-dir /path/to/data --seeds 42 123 456
+  # 有标签数据
+  python src/gar_feature_generator.py --data /path/to/transactions.csv \\
+                                      --card-col card_id \\
+                                      --account-features card_level,issuing_bank \\
+                                      --entity-cols card_id,merchant_id,device_type
 
-  # 导出特征后用独立脚本训练
-  python src/gar_feature_generator.py --data-dir /path/to/data --export-features-only --output-csv ./features.csv
-  python src/train_classifier.py --features ./features.csv --model gar
+  # 自定义特征列
+  python src/gar_feature_generator.py --data /path/to/data.csv \\
+                                      --card-col card_id \\
+                                      --account-features card_level,issuing_bank \\
+                                      --transaction-features amount,balance,timestamp \\
+                                      --entity-cols card_id,merchant_id,device_type \\
+                                      --export-features-only \\
+                                      --output-csv ./features.csv
         """
     )
 
-    parser.add_argument('--data-dir', type=str, required=True,
-                        help='IEEE-CIS数据集根目录')
+    parser.add_argument('--data', type=str, required=True,
+                        help='CSV文件路径')
+    parser.add_argument('--card-col', type=str, default=DEFAULT_CARD_COL,
+                        help=f'卡号列名（默认: {DEFAULT_CARD_COL}）')
+    parser.add_argument('--entity-cols', type=str, default=None,
+                        help='实体列名列表，逗号分隔')
+    parser.add_argument('--account-features', type=str, default=None,
+                        help='账户级特征列名，逗号分隔')
+    parser.add_argument('--transaction-features', type=str, default=None,
+                        help='交易级特征列名，逗号分隔')
     parser.add_argument('--output-dir', type=str, default='./outputs',
                         help='输出目录（默认: ./outputs）')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子（默认: 42）')
-    parser.add_argument('--seeds', type=int, nargs='+', default=None,
-                        help='多种子验证模式')
     parser.add_argument('--export-features-only', action='store_true',
                         help='仅生成特征，不训练模型')
     parser.add_argument('--feature-only', action='store_true',
@@ -335,98 +416,52 @@ Examples:
 
     args = parser.parse_args()
 
-    # 统一 --feature-only 和 --export-features-only
     export_only = args.export_features_only or args.feature_only
 
+    entity_cols = args.entity_cols.split(',') if args.entity_cols else DEFAULT_ENTITY_COLS
+    account_features = args.account_features.split(',') if args.account_features else []
+    transaction_features = args.transaction_features.split(',') if args.transaction_features else []
+
     print("="*60, flush=True)
-    print("GAR-Inspired Feature Generator", flush=True)
+    print("GAR Feature Generator (White Sample Mode)", flush=True)
     print("="*60, flush=True)
 
     start_time = time.time()
 
-    if args.seeds:
-        # 多种子模式
-        all_results = []
-        all_feature_names = None
+    # 1. 加载数据
+    df, card_col, entity_cols, account_features, transaction_features, has_label, label_col = load_and_preprocess_data(
+        args.data, args.card_col, entity_cols, account_features, transaction_features
+    )
 
-        for seed in args.seeds:
-            result, feature_names = run_full_experiment(args.data_dir, seed, args.output_dir)
-            result['seed'] = seed
-            all_results.append(result)
-            all_feature_names = feature_names
+    # 2. 构建图
+    tx_neighbors = build_graph(df, entity_cols)
 
-        # 聚合结果
-        print("\n" + "="*60, flush=True)
-        print("AGGREGATED RESULTS", flush=True)
-        print("="*60, flush=True)
+    # 3. 构建特征
+    features_dict, feature_names = build_gar_features(
+        df, tx_neighbors, card_col, entity_cols, account_features,
+        transaction_features, has_label, label_col
+    )
 
-        for model in ['gar_full', 'baseline']:
-            if model in all_results[0]:
-                aucs = [r[model]['test_auc'] for r in all_results]
-                print(f"{model}: Test={np.mean(aucs):.4f}±{np.std(aucs):.4f}")
-
-        # 保存结果
-        os.makedirs(args.output_dir, exist_ok=True)
-        out_file = f"{args.output_dir}/gar_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-        output = {
-            'experiment': 'GAR-Inspired Feature Generator',
-            'seeds': args.seeds,
-            'aggregated': {},
-            'feature_names': all_feature_names
-        }
-
-        for model in ['gar_full', 'baseline']:
-            if model in all_results[0]:
-                aucs = [r[model]['test_auc'] for r in all_results]
-                output['aggregated'][model] = {
-                    'test_auc_mean': float(np.mean(aucs)),
-                    'test_auc_std': float(np.std(aucs)),
-                    'individual': [float(x) for x in aucs]
-                }
-                if model == 'gar_full' and 'train_auc' in all_results[0][model]:
-                    train_aucs = [r[model]['train_auc'] for r in all_results]
-                    output['aggregated'][model]['train_auc_mean'] = float(np.mean(train_aucs))
-                    output['aggregated'][model]['train_auc_std'] = float(np.std(train_aucs))
-
-        with open(out_file, 'w') as f:
-            json.dump(output, f, indent=2)
-
-        print(f"\nResults saved to {out_file}", flush=True)
-    else:
-        # 单种子模式
-        # 1. 加载数据
-        train_data, test_data, y_train, y_test, train_idx, test_idx = load_and_preprocess_data(
-            args.data_dir, DEFAULT_ENTITY_COLS
-        )
-
-        # 2. 构建图
-        tx_neighbors = build_graph(train_data, DEFAULT_ENTITY_COLS)
-
-        # 3. 构建特征
-        train_feat, test_feat, feature_names = build_gar_features(
-            train_data, test_data, tx_neighbors, train_idx, y_train, DEFAULT_ENTITY_COLS
-        )
-
-        if export_only:
-            # 仅导出特征
-            if args.output_csv:
-                export_features_to_csv(train_feat, test_feat, feature_names,
-                                      y_train, y_test, train_idx, test_idx, args.output_csv)
-            else:
-                print("[ERROR] --output-csv is required when using --export-features-only", flush=True)
+    # 4. 导出或训练
+    if export_only:
+        if args.output_csv:
+            export_features_to_csv(features_dict, feature_names, args.output_csv, df, has_label)
         else:
-            # 完整流程
-            X_train = np.column_stack([train_feat[k] for k in feature_names])
-            X_test = np.column_stack([test_feat[k] for k in feature_names])
-            X_train = np.nan_to_num(X_train, nan=0, posinf=0, neginf=0)
-            X_test = np.nan_to_num(X_test, nan=0, posinf=0, neginf=0)
-
-            results = train_gar_classifier(X_train, y_train, X_test, y_test, feature_names, args.seed)
-
-            print(f"\nGAR Full: Train={results['gar_full']['train_auc']:.4f}, "
-                  f"Test={results['gar_full']['test_auc']:.4f}", flush=True)
-            print(f"Baseline: {results['baseline']['test_auc']:.4f}", flush=True)
+            print("[ERROR] --output-csv is required when using --export-features-only", flush=True)
+    else:
+        if has_label:
+            results = train_classifier(features_dict, feature_names, has_label, label_col, seed=args.seed)
+            if results:
+                print(f"\nTrain AUC: {results['train_auc']:.4f}", flush=True)
+                print(f"Test AUC: {results['test_auc']:.4f}", flush=True)
+                print("\nTop 10 Features:", flush=True)
+                for i, (name, imp) in enumerate(sorted(results['feature_importance'], key=lambda x: x[1], reverse=True)[:10]):
+                    print(f"  {i+1:2d}. {name:<40} {imp:.4f}", flush=True)
+        else:
+            print("[INFO] White sample mode - use --export-features-only to save features", flush=True)
+            os.makedirs(args.output_dir, exist_ok=True)
+            output_csv = args.output_csv or f"{args.output_dir}/gar_features_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            export_features_to_csv(features_dict, feature_names, output_csv, df, has_label)
 
     print(f"\nTotal time: {(time.time()-start_time)/60:.1f} minutes", flush=True)
 
