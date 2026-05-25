@@ -65,33 +65,42 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 
 ### 3.1 Synthetic Financial 数据集 (10K行)
 
-**多方法对比实验：**
+**KG vs GAR 多方法对比实验：**
 
 | Method | AUC | Precision | Recall | F1 | Notes |
 |--------|------|-----------|--------|-----|-------|
-| Baseline (freq + agg only) | 0.9848 | 0.9304 | 0.7535 | 0.8327 | 无欺诈率特征 |
-| Entity Fraud Rate only | 0.5398 | 0.0000 | 0.0000 | 0.0000 | 仅user_id欺诈率 |
-| **GAR-Inspired (Full)** | **0.9350** | **1.0000** | **0.6761** | **0.8067** | Entity+Pair欺诈率 |
+| **KG (graph features)** | 0.9204 | 0.9394 | 0.6549 | 0.7718 | 图度/邻居统计 |
+| GAR (base only) | 0.9848 | 0.9224 | 0.7535 | 0.8295 | 频率/聚合特征 |
+| **GAR-Inspired (Full)** | 0.9350 | **1.0000** | 0.6761 | 0.8067 | +欺诈率特征 |
 
-**Feature Importance (GAR-Inspired):**
+**Feature Importance (KG top features):**
+```
+ 1. amt_1hop_max                             0.2943
+ 2. amt_1hop_std                             0.1417
+ 3. amt_1hop_mean                            0.1335
+ 4. card_amt_mean                            0.0609
+ 5. card_amt_max                             0.0546
+ 6. merchant_category_country_pair_count_log 0.0533
+ 7. country_count                            0.0427
+ 8. user_id_degree                           0.0417
+ 9. card_amt_std                             0.0389
+10. merchant_category_degree                 0.0234
+```
+
+**Feature Importance (GAR top features):**
 ```
  1. amt_to_card_mean_ratio                   0.6267
  2. neigh_fraud_rate                         0.2195
  3. user_id_fraud_rate                       0.0337
  4. card_amt_max                             0.0266
  5. transaction_type_country_pair_freq       0.0229
- 6. n_1hop_log                               0.0214
- 7. country_freq                             0.0141
- 8. country_fraud_rate                       0.0090
- 9. country_freq_log                         0.0070
-10. n_1hop                                   0.0039
 ```
 
 **分析**：
-- **Baseline (freq+agg)** 在AUC和Recall上最优，但Precision稍低
-- **Entity Fraud Rate only** 表现差，说明单一欺诈率特征不足以区分
-- **GAR-Inspired** Precision=1.0表示所有预测的欺诈都是真正的欺诈，但Recall较低
-- 关键发现：Pair Fraud Rate 和 neigh_fraud_rate 贡献了主要性能
+- **GAR (base only)** 在AUC和Recall上最优，说明基础频率/聚合特征已经很强
+- **KG** 的优势在于图结构特征（amt_1hop_*），但在Recall上略低
+- **GAR-Inspired (Full)** Precision=1.0表示所有预测的欺诈都是真正的欺诈，但加入欺诈率后Recall下降
+- 关键发现：在Synthetic Financial上，基础特征（无欺诈率）表现更好，因为欺诈率特征对测试集覆盖不足
 
 ### 3.2 PaySim 数据集 (100K样本)
 
