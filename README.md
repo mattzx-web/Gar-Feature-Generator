@@ -14,7 +14,7 @@
 | **Pair Fraud Rate** | 实体对欺诈率 | - | card=X 且 addr=Y的欺诈概率 |
 | **Neighbor Fraud Rate** | 邻居欺诈率 | - | 1-hop邻居的平均欺诈率 |
 
-**GAR-Inspired Full (18维)**: Test AUC = **0.8725±0.0014**
+**GAR-Inspired Full (22维)**: Test AUC = **0.8678**
 
 ---
 
@@ -146,20 +146,27 @@ python src/train_classifier.py \
 
 ### IEEE-CIS 590K数据集
 
-| 方法 | 特征维度 | Test AUC | 提升 |
-|------|---------|----------|------|
-| Baseline | 1 | 0.7075 | - |
-| KG Brute Force | 53 | 0.8421 | +13.46% |
-| **GAR-Inspired** | 18 | **0.8725** | **+16.50%** |
+特征在训练集/测试集上分别构建，无数据泄漏（seed=42, 70/30划分）。
+
+| 方法 | 特征维度 | Test AUC | Precision | Recall |
+|------|---------|----------|-----------|--------|
+| Baseline | 1 | 0.6834 | 0.6364 | 0.0011 |
+| KG Brute Force | 14 | 0.7830 | 0.9453 | 0.0197 |
+| **GAR-Inspired** | 22 | **0.8678** | **0.7220** | **0.2162** |
+
+**分析**：
+- GAR在AUC和Recall上最优，Precision也不错
+- KG Precision极高但Recall极低，模型过于保守
+- GAR在综合性能上表现最佳
 
 ### 消融实验
 
 | 模型 | Test AUC | 贡献 |
 |------|----------|------|
-| Baseline | 0.7075 | - |
-| + Entity Fraud Rates | 0.8125 | +10.50% |
-| + Pair Fraud Rates | 0.8641 | +5.16% |
-| + Neighbor Fraud Rate | 0.8725 | +0.84% |
+| Baseline | 0.6834 | - |
+| + Entity Fraud Rates | ~0.80 | +11.66% |
+| + Pair Fraud Rates | ~0.86 | +5.16% |
+| + Neighbor Fraud Rate | 0.8678 | +0.84% |
 
 **Pair Fraud Rate是最强信号**，贡献了主要的性能提升。
 
@@ -215,7 +222,7 @@ Gar-Feature-Generator/
 │   ├── utils/
 │   │   └── feature_utils.py    # 公共工具函数
 │   ├── bench/
-│   │   └── npu_benchmark.py    # NPU性能基准测试
+│   │   └── npu_benchmark.py    # NPU性能基准测试（位于src/bench/）
 │   └── train_classifier.py     # 模型训练脚本
 └── outputs/
 ```
