@@ -290,19 +290,22 @@ Examples:
             results = train_baseline_classifier(X_train, y_train, X_test, y_test, args.seed)
 
         model_key = args.model if args.model != 'baseline' else 'baseline'
-        if model_key in results:
-            print(f"\n{model_key.upper()} Results:", flush=True)
-            print(f"  Train AUC: {results[model_key]['train_auc']:.4f}", flush=True)
-            print(f"  Test AUC:  {results[model_key]['test_auc']:.4f}", flush=True)
+        # Map short names to actual keys
+        key_map = {'gar': 'gar_full', 'kg': 'kg_brute_force', 'baseline': 'baseline'}
+        actual_key = key_map.get(model_key, model_key)
+        if actual_key in results:
+            print(f"\n{actual_key.upper()} Results:", flush=True)
+            print(f"  Train AUC: {results[actual_key]['train_auc']:.4f}", flush=True)
+            print(f"  Test AUC:  {results[actual_key]['test_auc']:.4f}", flush=True)
 
             # 打印Top 10特征重要性
-            if 'feature_importance' in results[model_key]:
+            if 'feature_importance' in results[actual_key]:
                 print("\nTop 10 Feature Importance:", flush=True)
-                feat_imp = sorted(results[model_key]['feature_importance'], key=lambda x: x[1], reverse=True)[:10]
+                feat_imp = sorted(results[actual_key]['feature_importance'], key=lambda x: x[1], reverse=True)[:10]
                 for i, (name, imp) in enumerate(feat_imp):
                     print(f"  {i+1:2d}. {name:<40} {imp:.4f}", flush=True)
 
-        if 'baseline' in results:
+        if 'baseline' in results and actual_key != 'baseline':
             print(f"\nBaseline (TransactionAmt only) Test AUC: {results['baseline']['test_auc']:.4f}", flush=True)
 
     print(f"\nTotal time: {(time.time()-start_time)/60:.1f} minutes", flush=True)
