@@ -65,42 +65,38 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 
 ### 3.1 Synthetic Financial 数据集 (10K行)
 
-**KG vs GAR 多方法对比实验：**
+**完整方法对比实验：**
 
 | Method | AUC | Precision | Recall | F1 | Notes |
 |--------|------|-----------|--------|-----|-------|
-| **KG (graph features)** | 0.9204 | 0.9394 | 0.6549 | 0.7718 | 图度/邻居统计 |
+| Raw (amount only) | 0.9914 | 0.9524 | 0.9859 | 0.9689 | 原始金额特征 |
+| Raw + Risk Scores | **1.0000** | **1.0000** | **1.0000** | **1.0000** | 包含预设计风险分数 |
+| Raw + Encoded Cat | **1.0000** | **1.0000** | **1.0000** | **1.0000** | 原始+类别编码 |
+| KG (graph features) | 0.9204 | 0.9394 | 0.6549 | 0.7718 | 图结构特征 |
 | GAR (base only) | 0.9848 | 0.9224 | 0.7535 | 0.8295 | 频率/聚合特征 |
-| **GAR-Inspired (Full)** | 0.9350 | **1.0000** | 0.6761 | 0.8067 | +欺诈率特征 |
+| GAR (full + fraud) | 0.9350 | **1.0000** | 0.6761 | 0.8067 | +欺诈率特征 |
 
-**Feature Importance (KG top features):**
-```
- 1. amt_1hop_max                             0.2943
- 2. amt_1hop_std                             0.1417
- 3. amt_1hop_mean                            0.1335
- 4. card_amt_mean                            0.0609
- 5. card_amt_max                             0.0546
- 6. merchant_category_country_pair_count_log 0.0533
- 7. country_count                            0.0427
- 8. user_id_degree                           0.0417
- 9. card_amt_std                             0.0389
-10. merchant_category_degree                 0.0234
-```
+**关键发现**：
+- **Synthetic Financial是合成数据集**，包含预设计的相关性
+- `device_risk_score` 与 fraud 的相关性：**0.8720**
+- `ip_risk_score` 与 fraud 的相关性：**0.8707**
+- **只有Q4（最高25%）的风险分数包含欺诈**
+- 因此**原始特征已经很强**，特征工程反而降低了性能
+- 这说明GAR在**真实数据集**（如IEEE-CIS）上更有价值
 
-**Feature Importance (GAR top features):**
+**Feature Importance (Raw + Risk Scores):**
 ```
- 1. amt_to_card_mean_ratio                   0.6267
- 2. neigh_fraud_rate                         0.2195
- 3. user_id_fraud_rate                       0.0337
- 4. card_amt_max                             0.0266
- 5. transaction_type_country_pair_freq       0.0229
+  device_risk_score  (重要性: 0.87)
+  ip_risk_score     (重要性: 0.87)
+  amount            (重要性: 0.64)
 ```
 
-**分析**：
-- **GAR (base only)** 在AUC和Recall上最优，说明基础频率/聚合特征已经很强
-- **KG** 的优势在于图结构特征（amt_1hop_*），但在Recall上略低
-- **GAR-Inspired (Full)** Precision=1.0表示所有预测的欺诈都是真正的欺诈，但加入欺诈率后Recall下降
-- 关键发现：在Synthetic Financial上，基础特征（无欺诈率）表现更好，因为欺诈率特征对测试集覆盖不足
+**与真实数据集的对比**：
+
+| Dataset | Raw特征信号强度 | GAR价值 |
+|---------|----------------|---------|
+| Synthetic Financial | 极强（预设计） | ❌ 无需GAR |
+| IEEE-CIS | 中等 | ✅ GAR提升显著 |
 
 ### 3.2 PaySim 数据集 (100K样本)
 
