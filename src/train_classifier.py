@@ -55,10 +55,10 @@ def load_features_from_csv(csv_path, train_ratio=0.7, seed=42):
 
     # 检测是否有split列
     has_split = 'split' in df.columns
-    has_label = 'isFraud' in df.columns
+    has_label = 'isFraud' in df.columns or 'is_fraud' in df.columns
 
     # 获取特征列（排除meta列和非数值列）
-    meta_cols = ['split', 'original_idx', 'isFraud']
+    meta_cols = ['split', 'original_idx', 'isFraud', 'is_fraud']
     key_cols = ['card_id', 'timestamp', '时间戳', 'TransactionID', 'transaction_id']
     exclude_cols = meta_cols + key_cols
     feature_cols = [c for c in df.columns if c not in exclude_cols]
@@ -69,11 +69,14 @@ def load_features_from_csv(csv_path, train_ratio=0.7, seed=42):
     if has_split and has_label:
         train_mask = df['split'] == 'train'
         test_mask = df['split'] == 'test'
+        label_col = 'isFraud' if 'isFraud' in df.columns else 'is_fraud'
         X_train = df.loc[train_mask, feature_cols].values
         X_test = df.loc[test_mask, feature_cols].values
-        y_train = df.loc[train_mask, 'isFraud'].values
-        y_test = df.loc[test_mask, 'isFraud'].values
+        y_train = df.loc[train_mask, label_col].values
+        y_test = df.loc[test_mask, label_col].values
     elif has_label:
+        # 确定标签列名
+        label_col = 'isFraud' if 'isFraud' in df.columns else 'is_fraud'
         # 无split列，随机划分
         n = len(df)
         indices = np.arange(n)
@@ -84,8 +87,8 @@ def load_features_from_csv(csv_path, train_ratio=0.7, seed=42):
         test_idx = indices[n_train:]
         X_train = df[feature_cols].iloc[train_idx].values
         X_test = df[feature_cols].iloc[test_idx].values
-        y_train = df['isFraud'].iloc[train_idx].values
-        y_test = df['isFraud'].iloc[test_idx].values
+        y_train = df[label_col].iloc[train_idx].values
+        y_test = df[label_col].iloc[test_idx].values
     else:
         # 无标签，白样本模式不支持训练
         raise ValueError("No label column found. Please provide features with 'isFraud' column.")

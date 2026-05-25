@@ -2,13 +2,15 @@
 分布式GAR特征生成器
 
 支持多进程加速，处理千万到亿级交易记录。
+支持无数据泄漏模式。
 
 用法:
-    # 多进程分布式
-    python src/gar_feature_generator_dist.py --data /path/to/data.csv \
-                                              --card-col card_id \
-                                              --workers 8 \
-                                              --output-csv ./features.csv
+    # 多进程分布式（无泄漏模式）
+    python src/gar/gar_dist.py --data /path/to/data.csv \\
+                                --card-col card_id \\
+                                --workers 8 \\
+                                --no-leakage \\
+                                --output-csv ./features.csv
 """
 
 import pandas as pd
@@ -68,9 +70,29 @@ def build_graph(df, entity_cols, neighbor_threshold=300):
     return tx_neighbors
 
 
+def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
+    """从训练集计算欺诈率映射（避免数据泄漏）"""
+    entity_fraud_maps = {}
+    for col in entity_cols:
+        if col in train_df.columns:
+            entity_fraud_maps[col] = train_df.groupby(col)[label_col].mean().to_dict()
+
+    pair_fraud_maps = {}
+    for i, col1 in enumerate(entity_cols[:4]):
+        for col2 in entity_cols[i+1:5]:
+            if col1 not in train_df.columns or col2 not in train_df.columns:
+                continue
+            pair_df = train_df[[col1, col2, label_col]].copy()
+            pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
+            pair_fraud_maps[f'{col1}_{col2}'] = pair_df.groupby('_pair')[label_col].mean().to_dict()
+
+    return entity_fraud_maps, pair_fraud_maps
+
+
 def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
-                        account_features, transaction_features, has_label, label_col):
-    """构建GAR特征（通用版本）"""
+                        account_features, transaction_features, has_label, label_col,
+                        entity_fraud_maps=None, pair_fraud_maps=None):
+    """构建GAR特征"""
 
     features = {}
     n = len(df)
@@ -193,34 +215,47 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
                 pass
             break
 
-    # ========== 8. GAR Fraud Rate特征（仅当有标签时） ==========
+    # ========== 8. GAR Fraud Rate特征 ==========
     if has_label and label_col:
-        labels = df[label_col].values
+        if entity_fraud_maps:
+            # 无泄漏模式：使用预计算的欺诈率映射
+            for col in entity_cols:
+                if col not in df_columns or col not in entity_fraud_maps:
+                    continue
+                features[f'{col}_fraud_rate'] = np.array([entity_fraud_maps[col].get(v, 0) for v in df[col].values], dtype=np.float32)
 
-        # Entity Fraud Rates
-        for col in entity_cols:
-            if col not in df_columns:
-                continue
-            fraud_map = df.groupby(col)[label_col].mean().to_dict()
-            features[f'{col}_fraud_rate'] = np.array([fraud_map.get(v, 0) for v in df[col].values], dtype=np.float32)
-
-        # Pair Fraud Rates
-        for i, col1 in enumerate(entity_cols[:4]):
-            for col2 in entity_cols[i+1:5]:
+            for col_pair, fraud_map in pair_fraud_maps.items():
+                col1, col2 = col_pair.split('_', 1)
                 if col1 not in df_columns or col2 not in df_columns:
                     continue
-                pair_df = df[[col1, col2, label_col]].copy()
-                pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
-                fraud_map = pair_df.groupby('_pair')[label_col].mean().to_dict()
-                pair_values = df[col1].astype(str) + '_' + df[col2].astype(str)
+                pair_values = (df[col1].astype(str) + '_' + df[col2].astype(str)).values
                 features[f'{col1}_{col2}_pair_fraud_rate'] = np.array([fraud_map.get(p, 0) for p in pair_values], dtype=np.float32)
+        else:
+            # 泄漏模式：在全部数据上计算
+            for col in entity_cols:
+                if col not in df_columns:
+                    continue
+                fraud_map = df.groupby(col)[label_col].mean().to_dict()
+                features[f'{col}_fraud_rate'] = np.array([fraud_map.get(v, 0) for v in df[col].values], dtype=np.float32)
+
+            for i, col1 in enumerate(entity_cols[:4]):
+                for col2 in entity_cols[i+1:5]:
+                    if col1 not in df_columns or col2 not in df_columns:
+                        continue
+                    pair_df = df[[col1, col2, label_col]].copy()
+                    pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
+                    fraud_map = pair_df.groupby('_pair')[label_col].mean().to_dict()
+                    pair_values = df[col1].astype(str) + '_' + df[col2].astype(str)
+                    features[f'{col1}_{col2}_pair_fraud_rate'] = np.array([fraud_map.get(p, 0) for p in pair_values], dtype=np.float32)
 
         # Neighbor Fraud Rate
         neigh_fraud_rates = np.zeros(n, dtype=np.float32)
-        for i in range(n):
-            neighs = tx_neighbors.get(i, set())
-            if neighs:
-                neigh_fraud_rates[i] = labels[list(neighs)].mean()
+        if has_label:
+            labels = df[label_col].values
+            for i in range(n):
+                neighs = tx_neighbors.get(i, set())
+                if neighs:
+                    neigh_fraud_rates[i] = labels[list(neighs)].mean()
         features['neigh_fraud_rate'] = neigh_fraud_rates
 
     # 清理
@@ -233,20 +268,39 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
 def process_partition(args):
     """并行worker函数"""
     (p_id, df_dict, global_stats, entity_cols, card_col,
-     account_features, transaction_features, has_label, label_col) = args
+     account_features, transaction_features, has_label, label_col,
+     entity_fraud_maps, pair_fraud_maps) = args
 
     df = pd.DataFrame(df_dict)
     tx_neighbors = build_graph(df, entity_cols)
     features = build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
-                                   account_features, transaction_features, has_label, label_col)
+                                   account_features, transaction_features, has_label, label_col,
+                                   entity_fraud_maps, pair_fraud_maps)
 
     return features, list(df.columns), p_id
 
 
+def split_data(df, train_ratio=0.7, seed=42):
+    """分割训练集和测试集"""
+    n = len(df)
+    indices = np.arange(n)
+    np.random.seed(seed)
+    np.random.shuffle(indices)
+    n_train = int(train_ratio * n)
+    train_idx = indices[:n_train]
+    test_idx = indices[n_train:]
+    return train_idx, test_idx
+
+
 def run_distributed(data_path, card_col, entity_cols, account_features,
-                    transaction_features, n_workers, output_csv):
+                    transaction_features, n_workers, output_csv,
+                    no_leakage=True, train_ratio=0.7, seed=42):
     """分布式GAR特征生成"""
     print(f"[MODE] Distributed GAR ({n_workers} workers)", flush=True)
+    if no_leakage:
+        print(f"[MODE] NO-LEAKAGE MODE (fraud rates from train only)", flush=True)
+    else:
+        print(f"[MODE] LEAKAGE MODE (fraud rates from all data)", flush=True)
     start_time = time.time()
 
     # 1. 加载全部数据
@@ -277,10 +331,22 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
             amount_col = col
             break
 
-    # 3. 全局统计量
+    # 3. 数据分割（无泄漏模式）
+    train_idx, test_idx = split_data(df, train_ratio=train_ratio, seed=seed)
+    print(f"[INFO] Data split: Train={len(train_idx)}, Test={len(test_idx)}", flush=True)
+
+    # 4. 计算欺诈率映射（无泄漏模式）
+    entity_fraud_maps = None
+    pair_fraud_maps = None
+    if no_leakage and has_label:
+        train_df = df.iloc[train_idx]
+        entity_fraud_maps, pair_fraud_maps = compute_fraud_rates_from_train(train_df, entity_cols, label_col)
+        print("[INFO] Computed fraud rates from train only", flush=True)
+
+    # 5. 全局统计量
     global_stats = compute_global_stats(df, entity_cols, card_col, amount_col)
 
-    # 4. 分区
+    # 6. 分区
     print(f"[INFO] Partitioning into {n_workers} shards...", flush=True)
     df['_p'] = df[card_col].apply(lambda x: hash(x) % n_workers)
     partitions = []
@@ -290,18 +356,19 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
         print(f"[INFO] Partition {p}: {len(partitions[-1])} records", flush=True)
     del df
 
-    # 5. 并行处理
+    # 7. 并行处理
     print("[INFO] Parallel processing...", flush=True)
     args_list = [
         (p_id, p.to_dict('list'), global_stats, entity_cols, card_col,
-         account_features, transaction_features, has_label, label_col)
+         account_features, transaction_features, has_label, label_col,
+         entity_fraud_maps, pair_fraud_maps)
         for p_id, p in enumerate(partitions)
     ]
 
     with Pool(n_workers) as pool:
         results = pool.map(process_partition, args_list)
 
-    # 6. 合并
+    # 8. 合并
     print("[INFO] Merging results...", flush=True)
     all_features = {}
     for features, _, _ in results:
@@ -313,7 +380,7 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
     for k in all_features:
         all_features[k] = np.concatenate(all_features[k])
 
-    # 7. 导出
+    # 9. 导出
     if output_csv:
         os.makedirs(os.path.dirname(output_csv) if os.path.dirname(output_csv) else '.', exist_ok=True)
         df_features = pd.DataFrame(all_features)
@@ -323,6 +390,11 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
             df_features = pd.concat([all_dfs[key_cols], df_features], axis=1)
         if has_label and label_col:
             df_features[label_col] = all_dfs[label_col].values
+
+        # 添加split列
+        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(len(df_features))])
+        df_features['split'] = split_arr
+
         df_features.to_csv(output_csv, index=False)
         print(f"[INFO] Saved to {output_csv}", flush=True)
         print(f"[INFO] Shape: {df_features.shape}", flush=True)
@@ -337,11 +409,18 @@ def main():
         description='Distributed GAR Feature Generator',
         epilog="""
 Examples:
-  # 分布式模式
-  python src/gar_feature_generator_dist.py --data /path/to/large_data.csv \\
-                                            --card-col card_id \\
-                                            --workers 16 \\
-                                            --output-csv ./features.csv
+  # 分布式模式（无泄漏，默认）
+  python src/gar/gar_dist.py --data /path/to/large_data.csv \\
+                              --card-col card_id \\
+                              --workers 16 \\
+                              --output-csv ./features.csv
+
+  # 泄漏模式（不推荐）
+  python src/gar/gar_dist.py --data /path/to/large_data.csv \\
+                              --card-col card_id \\
+                              --workers 16 \\
+                              --leakage \\
+                              --output-csv ./features.csv
         """
     )
 
@@ -359,6 +438,14 @@ Examples:
                         help='并行worker数量')
     parser.add_argument('--output-csv', type=str, default=None,
                         help='特征CSV输出路径')
+    parser.add_argument('--no-leakage', action='store_true', default=True,
+                        help='防止数据泄漏：欺诈率仅从训练集计算（默认开启）')
+    parser.add_argument('--leakage', action='store_false', dest='no_leakage',
+                        help='关闭防泄漏模式：欺诈率从全部数据计算（不推荐）')
+    parser.add_argument('--train-ratio', type=float, default=0.7,
+                        help='训练集比例（默认: 0.7）')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='随机种子（默认: 42）')
 
     args = parser.parse_args()
 
@@ -367,7 +454,8 @@ Examples:
     transaction_features = args.transaction_features.split(',') if args.transaction_features else []
 
     run_distributed(args.data, args.card_col, entity_cols, account_features,
-                    transaction_features, args.workers, args.output_csv)
+                    transaction_features, args.workers, args.output_csv,
+                    args.no_leakage, args.train_ratio, args.seed)
 
 
 if __name__ == '__main__':
