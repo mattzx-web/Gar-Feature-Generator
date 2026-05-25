@@ -57,7 +57,7 @@ cd Gar-Feature-Generator
 pip install pandas numpy scikit-learn
 
 # 生成GAR特征
-python src/gar_feature_generator.py \
+python src/gar/gar_cpu.py \
     --data data/transactions.csv \
     --card-col card_id \
     --output-csv ./features.csv
@@ -72,7 +72,7 @@ python src/gar_feature_generator.py \
 仅生成图结构特征（度、频率、邻居统计）：
 
 ```bash
-python src/gar_feature_generator_ascend.py \
+python src/gar/gar_ascend.py \
     --data data/transactions.csv \
     --card-col card_id \
     --output-csv ./features.csv
@@ -83,7 +83,7 @@ python src/gar_feature_generator_ascend.py \
 生成完整GAR特征（含欺诈率）：
 
 ```bash
-python src/gar_feature_generator.py \
+python src/gar/gar_cpu.py \
     --data-dir /path/to/ieee-fraud-detection \
     --card-col card_id
 ```
@@ -182,11 +182,21 @@ features[f'{col1}_{col2}_pair_fraud_rate'] = [fraud_map.get(p, 0) for p in pair_
 Gar-Feature-Generator/
 ├── README.md
 ├── src/
-│   ├── gar_feature_generator.py          # 基础GAR实现
-│   ├── gar_feature_generator_ascend.py  # 优化版本（含NPU支持）
-│   ├── gar_feature_generator_dist.py    # 分布式版本
-│   ├── kg_feature_generator.py          # KG基线
-│   └── train_classifier.py              # 模型训练
+│   ├── gar/
+│   │   ├── gar_cpu.py          # 基础GAR实现（CPU模式）
+│   │   ├── gar_ascend.py       # Ascend NPU加速版本
+│   │   └── gar_dist.py         # 分布式多进程版本
+│   ├── kg/
+│   │   ├── kg_cpu.py          # 基础KG实现
+│   │   ├── kg_ascend.py        # Ascend NPU加速版本
+│   │   ├── kg_dist.py          # 分布式版本
+│   │   ├── kg_gpu.py           # CUDA GPU加速版本
+│   │   └── kg_brute_force.py   # KG暴力枚举基线
+│   ├── utils/
+│   │   └── feature_utils.py    # 公共工具函数
+│   ├── bench/
+│   │   └── npu_benchmark.py    # NPU性能基准测试
+│   └── train_classifier.py     # 模型训练脚本
 └── outputs/
 ```
 
