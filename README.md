@@ -112,12 +112,32 @@ card_id,merchant_id,device_type,transaction_type,amount,timestamp,is_pos
 123456,SHOP002,WEB001,ONLINE,200.00,2026-05-20,0
 ```
 
-### IEEE-CIS
+### IEEE-CIS Data
+
+下载链接: https://www.kaggle.com/competitions/ieee-fraud-detection/data
 
 ```
 data_dir/
 ├── train_transaction.csv    # 交易记录（含isFraud标签）
 └── train_identity.csv       # 身份信息
+```
+
+---
+
+## 完整工作流
+
+```bash
+# 1. 生成GAR特征
+python src/gar/gar_cpu.py \
+    --data data/transactions.csv \
+    --card-col card_id \
+    --export-features-only \
+    --output-csv ./features.csv
+
+# 2. 训练分类器
+python src/train_classifier.py \
+    --features ./features.csv \
+    --model gar
 ```
 
 ---

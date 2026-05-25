@@ -38,31 +38,57 @@ DEFAULT_N_ESTIMATORS = 200
 DEFAULT_MAX_DEPTH = 6
 
 
-def load_features_from_csv(csv_path):
+def load_features_from_csv(csv_path, train_ratio=0.7, seed=42):
     """
     从CSV文件加载特征
 
     Args:
         csv_path: 特征CSV文件路径
+        train_ratio: 训练集比例（默认0.7）
+        seed: 随机种子
 
     Returns:
-        X_train, X_test, y_train, y_test, feature_names, split_info
+        X_train, X_test, y_train, y_test, feature_names
     """
     print(f"[INFO] Loading features from {csv_path}...", flush=True)
     df = pd.read_csv(csv_path)
 
-    # 分离训练/测试集
-    train_mask = df['split'] == 'train'
-    test_mask = df['split'] == 'test'
+    # 检测是否有split列
+    has_split = 'split' in df.columns
+    has_label = 'isFraud' in df.columns
 
-    # 获取特征列（排除meta列）
-    meta_cols = ['isFraud', 'split', 'original_idx']
-    feature_cols = [c for c in df.columns if c not in meta_cols]
+    # 获取特征列（排除meta列和非数值列）
+    meta_cols = ['split', 'original_idx', 'isFraud']
+    key_cols = ['card_id', 'timestamp', '时间戳', 'TransactionID', 'transaction_id']
+    exclude_cols = meta_cols + key_cols
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
 
-    X_train = df.loc[train_mask, feature_cols].values
-    X_test = df.loc[test_mask, feature_cols].values
-    y_train = df.loc[train_mask, 'isFraud'].values
-    y_test = df.loc[test_mask, 'isFraud'].values
+    # 过滤非数值列
+    feature_cols = [c for c in feature_cols if df[c].dtype in ['int64', 'float64', 'int32', 'float32']]
+
+    if has_split and has_label:
+        train_mask = df['split'] == 'train'
+        test_mask = df['split'] == 'test'
+        X_train = df.loc[train_mask, feature_cols].values
+        X_test = df.loc[test_mask, feature_cols].values
+        y_train = df.loc[train_mask, 'isFraud'].values
+        y_test = df.loc[test_mask, 'isFraud'].values
+    elif has_label:
+        # 无split列，随机划分
+        n = len(df)
+        indices = np.arange(n)
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        n_train = int(train_ratio * n)
+        train_idx = indices[:n_train]
+        test_idx = indices[n_train:]
+        X_train = df[feature_cols].iloc[train_idx].values
+        X_test = df[feature_cols].iloc[test_idx].values
+        y_train = df['isFraud'].iloc[train_idx].values
+        y_test = df['isFraud'].iloc[test_idx].values
+    else:
+        # 无标签，白样本模式不支持训练
+        raise ValueError("No label column found. Please provide features with 'isFraud' column.")
 
     print(f"[INFO] Train: {X_train.shape}, Test: {X_test.shape}", flush=True)
     print(f"[INFO] Features: {len(feature_cols)}", flush=True)
