@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name='gar-feature-generator',
     version='1.0.0',
-    description='Knowledge Graph Feature Engineering for Financial Anti-Fraud',
+    description='GAR-based Financial Anti-Fraud Feature Engineering Toolkit',
     author='Matt',
     author_email='matt@example.com',
     url='https://github.com/mattzx-web/Gar-Feature-Generator',
@@ -24,8 +24,12 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'gar-gen=src.gar_feature_generator:main',
-            'kg-gen=src.kg_brute_force_generator:main',
+            'gar-gen=src.gar.gar_cpu:main',
+            'gar-gen-dist=src.gar.gar_dist:main',
+            'gar-gen-ascend=src.gar.gar_ascend:main',
+            'kg-gen=src.kg.kg_brute_force:main',
+            'kg-gen-cpu=src.kg.kg_cpu:main',
+            'kg-gen-gpu=src.kg.kg_gpu:main',
         ],
     },
 )

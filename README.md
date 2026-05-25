@@ -84,7 +84,7 @@ python src/gar/gar_ascend.py \
 
 ```bash
 python src/gar/gar_cpu.py \
-    --data-dir /path/to/ieee-fraud-detection \
+    --data /path/to/transactions.csv \
     --card-col card_id
 ```
 
@@ -221,13 +221,13 @@ Gar-Feature-Generator/
 
 ```bash
 # CPU模式
-python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode cpu
+python src/gar/gar_cpu.py --data data.csv --card-col card_id --output-csv ./features.csv
 
-# NPU模式（自动检测Ascend环境）
-python src/gar_feature_generator_ascend.py --data data.csv --card-col card_id --mode npu
+# NPU加速版本（自动检测Ascend环境）
+python src/gar/gar_ascend.py --data data.csv --card-col card_id --mode npu --output-csv ./features.csv
 
 # 分布式（多进程）
-python src/gar_feature_generator_dist.py --data data.csv --card-col card_id --workers 16
+python src/gar/gar_dist.py --data data.csv --card-col card_id --workers 16 --output-csv ./features.csv
 ```
 
 ---
