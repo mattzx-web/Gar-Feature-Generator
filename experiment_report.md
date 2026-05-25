@@ -65,11 +65,15 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 
 ### 3.1 Synthetic Financial 数据集 (10K行)
 
-| Method | AUC | Precision | Recall | F1 | Test Frauds | Predicted |
-|--------|------|-----------|--------|-----|-------------|-----------|
-| **GAR-Inspired (No Leakage)** | **0.9460** | **1.0000** | **0.6761** | **0.8067** | 142 | 96 |
+**多方法对比实验：**
 
-**Top 10 Feature Importance:**
+| Method | AUC | Precision | Recall | F1 | Notes |
+|--------|------|-----------|--------|-----|-------|
+| Baseline (freq + agg only) | 0.9848 | 0.9304 | 0.7535 | 0.8327 | 无欺诈率特征 |
+| Entity Fraud Rate only | 0.5398 | 0.0000 | 0.0000 | 0.0000 | 仅user_id欺诈率 |
+| **GAR-Inspired (Full)** | **0.9350** | **1.0000** | **0.6761** | **0.8067** | Entity+Pair欺诈率 |
+
+**Feature Importance (GAR-Inspired):**
 ```
  1. amt_to_card_mean_ratio                   0.6267
  2. neigh_fraud_rate                         0.2195
@@ -84,9 +88,10 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 ```
 
 **分析**：
-- GAR在无泄漏模式下仍然表现优秀
-- Precision=1.0表示所有预测的欺诈都是真正的欺诈
-- Recall=0.6761表示能检测到67.6%的真实欺诈
+- **Baseline (freq+agg)** 在AUC和Recall上最优，但Precision稍低
+- **Entity Fraud Rate only** 表现差，说明单一欺诈率特征不足以区分
+- **GAR-Inspired** Precision=1.0表示所有预测的欺诈都是真正的欺诈，但Recall较低
+- 关键发现：Pair Fraud Rate 和 neigh_fraud_rate 贡献了主要性能
 
 ### 3.2 PaySim 数据集 (100K样本)
 
