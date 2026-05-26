@@ -48,9 +48,18 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 
 ### 2.1 问题描述
 
+**问题1：Entity/Pair Fraud Rate泄漏**
+
 原始实现在完整数据上计算欺诈率，然后随机划分训练/测试集：
 - 导致训练集和测试集的欺诈率完全相同（从同一数据计算）
 - 结果虚高：AUC = 1.0
+
+**问题2：Neighbor Fraud Rate泄漏**
+
+Neighbor Fraud Rate在计算时使用了测试集邻居的标签：
+- 无论是否启用no_leakage模式，都使用全量标签计算
+- 测试集邻居会包含其他测试集交易，而这些交易有真实标签
+- 虽然Neighbor Fraud Rate单独使用无效（AUC 0.5006），但修复仍是最佳实践
 
 ### 2.2 修复方案
 
@@ -58,6 +67,7 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 1. 先分割 train/test（70%/30%）
 2. 仅在训练集上计算欺诈率
 3. 将训练集欺诈率映射应用于测试集
+4. Neighbor Fraud Rate仅使用训练集邻居的标签
 
 ---
 

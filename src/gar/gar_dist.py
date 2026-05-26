@@ -91,7 +91,8 @@ def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
 
 def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
                         account_features, transaction_features, has_label, label_col,
-                        entity_fraud_maps=None, pair_fraud_maps=None):
+                        entity_fraud_maps=None, pair_fraud_maps=None,
+                        no_leakage=False, train_idx_set=None, train_label_map=None):
     """构建GAR特征"""
 
     features = {}
@@ -248,9 +249,17 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
                     pair_values = df[col1].astype(str) + '_' + df[col2].astype(str)
                     features[f'{col1}_{col2}_pair_fraud_rate'] = np.array([fraud_map.get(p, 0) for p in pair_values], dtype=np.float32)
 
-        # Neighbor Fraud Rate
+        # Neighbor Fraud Rate (无泄漏模式：仅使用训练集邻居的标签)
         neigh_fraud_rates = np.zeros(n, dtype=np.float32)
-        if has_label:
+        if has_label and no_leakage and train_label_map:
+            for i in range(n):
+                neighs = tx_neighbors.get(i, set())
+                if neighs:
+                    train_neighs = [n for n in neighs if n in train_idx_set]
+                    if train_neighs:
+                        neigh_fraud_rates[i] = np.mean([train_label_map[n] for n in train_neighs])
+        elif has_label:
+            # 泄漏模式：使用全量标签（不推荐）
             labels = df[label_col].values
             for i in range(n):
                 neighs = tx_neighbors.get(i, set())
@@ -269,13 +278,15 @@ def process_partition(args):
     """并行worker函数"""
     (p_id, df_dict, global_stats, entity_cols, card_col,
      account_features, transaction_features, has_label, label_col,
-     entity_fraud_maps, pair_fraud_maps) = args
+     entity_fraud_maps, pair_fraud_maps,
+     no_leakage, train_idx_set, train_label_map) = args
 
     df = pd.DataFrame(df_dict)
     tx_neighbors = build_graph(df, entity_cols)
     features = build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
                                    account_features, transaction_features, has_label, label_col,
-                                   entity_fraud_maps, pair_fraud_maps)
+                                   entity_fraud_maps, pair_fraud_maps,
+                                   no_leakage, train_idx_set, train_label_map)
 
     return features, list(df.columns), p_id
 
@@ -358,10 +369,19 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
 
     # 7. 并行处理
     print("[INFO] Parallel processing...", flush=True)
+
+    # 准备无泄漏模式所需的训练集信息
+    train_idx_set = set(train_idx) if no_leakage and has_label else None
+    train_label_map = None
+    if no_leakage and has_label:
+        train_labels = df.iloc[train_idx][label_col].values
+        train_label_map = dict(zip(train_idx, train_labels))
+
     args_list = [
         (p_id, p.to_dict('list'), global_stats, entity_cols, card_col,
          account_features, transaction_features, has_label, label_col,
-         entity_fraud_maps, pair_fraud_maps)
+         entity_fraud_maps, pair_fraud_maps,
+         no_leakage, train_idx_set, train_label_map)
         for p_id, p in enumerate(partitions)
     ]
 

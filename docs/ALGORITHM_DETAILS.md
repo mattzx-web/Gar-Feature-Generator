@@ -77,15 +77,19 @@ degree = 该交易的邻居数量（所有实体列的并集）
 | Entity Frequency | 训练集统计 | 无 |
 | Entity Fraud Rates | 训练集统计 | 无 |
 | Pair Fraud Rates | 训练集统计 | 无 |
-| Neighbor Fraud Rate | 训练集标签 | **测试时需特殊处理** |
+| Neighbor Fraud Rate | 训练集标签 | ✅ 已修复（仅用训练集邻居） |
 
-**Neighbor Fraud Rate的测试处理**:
+**Neighbor Fraud Rate的修复实现**:
 ```python
-# 对于测试集中的交易:
-global_i = test_indices[i]  # 测试集交易的全局索引
-neighs = tx_neighbors.get(global_i, set())  # 获取邻居（基于训练集构建的图）
-train_neighs = [n for n in neighs if n in train_indices_set]  # 只取训练集中的邻居
-neigh_fraud_rate = train_is_fraud[local_neighs].mean()  # 用训练集标签计算
+# 无泄漏模式：Neighbor Fraud Rate仅使用训练集邻居的标签
+train_idx_set = set(train_idx)
+train_label_map = dict(zip(train_idx, train_labels))
+
+for i in range(n):
+    neighs = tx_neighbors.get(i, set())
+    train_neighs = [n for n in neighs if n in train_idx_set]
+    if train_neighs:
+        neigh_fraud_rates[i] = np.mean([train_label_map[n] for n in train_neighs])
 ```
 
 ---
