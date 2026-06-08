@@ -373,6 +373,63 @@ python experiments/gar_white_fraud_experiment.py \
     --output-dir ./outputs/exp1
 ```
 
+###优化版：特征与训练分离 + 支持类别权重
+
+适用于**大规模不均衡数据**（1:20~1:40比例，千万级数据量）。
+
+**Step 1: 特征生成（可分离）**
+```bash
+# CPU模式
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/white.csv \
+    --output-dir ./outputs/exp \
+    --step generate
+
+# NPU加速（大规模数据）
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/white.csv \
+    --output-dir ./outputs/exp \
+    --step generate \
+    --mode npu
+
+# 分布式（多进程）
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/white.csv \
+    --output-dir ./outputs/exp \
+    --step generate \
+    --mode dist \
+    --workers 8
+```
+
+**Step 2: 分类器训练（支持类别权重）**
+```bash
+# 默认权重
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/white.csv \
+    --output-dir ./outputs/exp \
+    --step train
+
+# 类别权重=20（处理1:20不均衡）
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/white.csv \
+    --output-dir ./outputs/exp \
+    --step train \
+    --class-weight 20
+
+# 类别权重=40（处理1:40不均衡）
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/white.csv \
+    --output-dir ./outputs/exp \
+    --step train \
+    --class-weight 40
+```
+
 ### 工作流程
 
 ```
@@ -384,29 +441,25 @@ python experiments/gar_white_fraud_experiment.py \
 │ └────────┬─────────┘└────────┬─────────┘               │
 │           │                              │                          │
 │           └──────────────┬───────────────┘                        │
-│ ▼ │
-│              ┌───────────────────────┐                              │
-│              │ 合并数据           │                              │
-│              │  构建统一图结构        │                              │
-│└───────────┬───────────┘                              │
-│                          │                                          │
-│                          ▼                                          │
-│              ┌───────────────────────┐                              │
-│              │  train/test 划分 │                              │
-│              │  (仅用训练集算欺诈率)  │                              │
-│└───────────┬───────────┘                              │
-│                          │                                          │
-│                          ▼                                          │
-│              ┌───────────────────────┐                              │
-│              │  生成GAR特征(59维)    │                              │
-│              │  + split列 + isFraud列│                              │
-│              └───────────┬───────────┘                              │
-│                          │                                          │
-│                          ▼                                          │
-│              ┌───────────────────────┐                              │
-│              │  GradientBoosting分类 │                              │
-│              │  评估: AUC/Prec/Rec/F1 │                              │
-│              └───────────────────────┘                              │
+│                          ▼ │
+│              ┌───────────────────────┐                             │
+│              │  合并 + 构建图结构       │                             │
+│              │  (支持NPU/Dist加速)     │                             │
+│└───────────┬───────────┘                             │
+│                          │                                         │
+│                          ▼                                         │
+│              ┌───────────────────────┐                             │
+│              │  Step 1: 特征生成      │                             │
+│              │  分块导出CSV │                             │
+│              │  (避免内存溢出)        │                             │
+│└───────────┬───────────┘                             │
+│                          │                                         │
+│                          ▼                                         │
+│              ┌───────────────────────┐                             │
+│              │  Step 2: 分类器训练     │                             │
+│              │  sample_weight权重 │                             │
+│              │  评估: AUC/Prec/Rec/F1 │                             │
+│              └───────────────────────┘                             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -414,8 +467,18 @@ python experiments/gar_white_fraud_experiment.py \
 
 | 文件 | 说明 |
 |------|------|
-| `gar_white_fraud_features.csv` | 59维GAR特征 + split列 + isFraud列 |
-| `experiment_meta.json` | 实验元信息（数据量、欺诈率等）|
+| `gar_features.csv` | 分块导出的GAR特征 + split列 + isFraud列 |
+| `experiment_meta.json` | 实验元信息（数据量、欺诈率、特征名等）|
+| `training_results.json` | 训练结果（AUC、Precision、Recall、F1）|
+
+### 类别权重选择建议
+
+| 不均衡比例 | 推荐 --class-weight |
+|-----------|---------------------|
+| 1:10 | 10 |
+| 1:20 | 20 |
+| 1:30 | 30 |
+| 1:40 | 40 |
 
 ---
 
