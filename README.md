@@ -283,8 +283,6 @@ card_id,timestamp,amount,merchant_id,balance,card_level,card_location,card_type,
 
 ### 1. 生成GAR特征（自动导出split列）
 
-### 1. 生成GAR特征（自动导出split列）
-
 ```bash
 # 生成扩展特征（59维），自动分割训练/测试集并导出
 python src/gar/gar_cpu.py \
@@ -337,6 +335,87 @@ python experiments/gar_comparison_experiment.py \
     --data ./data/fraud_dataset.csv \
     --output-dir ./outputs/gar_comparison
 ```
+
+---
+
+## 白样本+欺诈样本实验
+
+当欺诈交易和白样本交易分属两个文件时，使用专用实验脚本：
+
+### 数据准备
+
+```csv
+# fraud_transactions.csv - 欺诈交易（包含 isFraud=1）
+card_id,timestamp,amount,merchant_id,balance,card_level,isFraud
+1001,2018-04-01 00:01:12,5000.00,5001,10000.00,3,1
+1002,2018-04-01 00:02:46,3000.00,5002,8000.00,2,1
+
+# white_transactions.csv - 白样本交易（无标签）
+card_id,timestamp,amount,merchant_id,balance,card_level
+2001,2018-04-01 00:01:12,50.00,6001,5000.00,1
+2002,2018-04-01 00:02:46,30.00,6002,3000.00,2
+```
+
+### 运行实验
+
+```bash
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud_transactions.csv \
+    --white-data ./data/white_transactions.csv \
+    --output-dir ./outputs/white_fraud_exp
+
+# 指定列名
+python experiments/gar_white_fraud_experiment.py \
+    --fraud-data ./data/fraud.csv \
+    --white-data ./data/normal.csv \
+    --card-col card_id \
+    --entity-cols card_id,merchant_id,device \
+    --output-dir ./outputs/exp1
+```
+
+### 工作流程
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 输入数据                                      │
+│  ┌──────────────────┐           ┌──────────────────┐               │
+│  │ fraud_data.csv    │           │ white_data.csv   │               │
+│  │ (欺诈交易 isFraud=1) │ │ (白样本 无标签)   │               │
+│ └────────┬─────────┘└────────┬─────────┘               │
+│           │                              │                          │
+│           └──────────────┬───────────────┘                        │
+│ ▼ │
+│              ┌───────────────────────┐                              │
+│              │ 合并数据           │                              │
+│              │  构建统一图结构        │                              │
+│└───────────┬───────────┘                              │
+│                          │                                          │
+│                          ▼                                          │
+│              ┌───────────────────────┐                              │
+│              │  train/test 划分 │                              │
+│              │  (仅用训练集算欺诈率)  │                              │
+│└───────────┬───────────┘                              │
+│                          │                                          │
+│                          ▼                                          │
+│              ┌───────────────────────┐                              │
+│              │  生成GAR特征(59维)    │                              │
+│              │  + split列 + isFraud列│                              │
+│              └───────────┬───────────┘                              │
+│                          │                                          │
+│                          ▼                                          │
+│              ┌───────────────────────┐                              │
+│              │  GradientBoosting分类 │                              │
+│              │  评估: AUC/Prec/Rec/F1 │                              │
+│              └───────────────────────┘                              │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 输出文件
+
+| 文件 | 说明 |
+|------|------|
+| `gar_white_fraud_features.csv` | 59维GAR特征 + split列 + isFraud列 |
+| `experiment_meta.json` | 实验元信息（数据量、欺诈率等）|
 
 ---
 
