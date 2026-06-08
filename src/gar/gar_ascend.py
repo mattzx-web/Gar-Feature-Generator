@@ -312,7 +312,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
 
 
 def run_ascend_gar(data_path, card_col, entity_cols, account_features,
-                   transaction_features, output_csv, npu_id=0, workers=1, mode='auto'):
+                   transaction_features, output_csv, npu_id=0, workers=1, mode='auto',
+                   label_col=None, fraud_value=1):
     """Ascend NPU加速GAR特征生成"""
     device_info = check_ascend_npu(mode=mode)
 
@@ -336,13 +337,16 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
                 df[col] = pd.factorize(df[col].astype(str))[0]
 
     has_label = False
-    label_col = None
-    for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
-        if col in df.columns:
-            has_label = True
-            label_col = col
-            print(f"[INFO] Found label column: {label_col}", flush=True)
-            break
+    if label_col and label_col in df.columns:
+        has_label = True
+        print(f"[INFO] Using explicit label column: {label_col}", flush=True)
+    else:
+        for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
+            if col in df.columns:
+                has_label = True
+                label_col = col
+                print(f"[INFO] Found label column: {label_col}", flush=True)
+                break
 
     amount_col = None
     for col in ['amount', '交易金额']:
@@ -427,6 +431,10 @@ Examples:
     parser.add_argument('--mode', type=str, default='auto',
                         choices=['auto', 'cpu', 'npu'],
                         help='运行模式: auto=自动检测, cpu=纯CPU, npu=强制NPU')
+    parser.add_argument('--label-col', type=str, default=None,
+                        help='欺诈标签列名（如 isFraud, fraud, label）')
+    parser.add_argument('--fraud-value', type=int, default=1,
+                        help='表示欺诈的值（默认: 1）')
 
     args = parser.parse_args()
 
@@ -446,7 +454,8 @@ Examples:
     transaction_features = args.transaction_features.split(',') if args.transaction_features else []
 
     run_ascend_gar(args.data, args.card_col, entity_cols, account_features,
-                   transaction_features, args.output_csv, args.npu_id, args.workers, args.mode)
+                   transaction_features, args.output_csv, args.npu_id, args.workers, args.mode,
+                   args.label_col, args.fraud_value)
 
 
 if __name__ == '__main__':

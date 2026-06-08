@@ -305,7 +305,8 @@ def split_data(df, train_ratio=0.7, seed=42):
 
 def run_distributed(data_path, card_col, entity_cols, account_features,
                     transaction_features, n_workers, output_csv,
-                    no_leakage=True, train_ratio=0.7, seed=42):
+                    no_leakage=True, train_ratio=0.7, seed=42,
+                    label_col=None, fraud_value=1):
     """分布式GAR特征生成"""
     print(f"[MODE] Distributed GAR ({n_workers} workers)", flush=True)
     if no_leakage:
@@ -328,13 +329,16 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
 
     # 检测标签
     has_label = False
-    label_col = None
-    for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
-        if col in df.columns:
-            has_label = True
-            label_col = col
-            print(f"[INFO] Found label column: {label_col}", flush=True)
-            break
+    if label_col and label_col in df.columns:
+        has_label = True
+        print(f"[INFO] Using explicit label column: {label_col}", flush=True)
+    else:
+        for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
+            if col in df.columns:
+                has_label = True
+                label_col = col
+                print(f"[INFO] Found label column: {label_col}", flush=True)
+                break
 
     amount_col = None
     for col in ['amount', '交易金额']:
@@ -365,17 +369,18 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
         mask = df['_p'] == p
         partitions.append(df[mask].drop(columns=['_p']).reset_index(drop=True))
         print(f"[INFO] Partition {p}: {len(partitions[-1])} records", flush=True)
-    del df
 
-    # 7. 并行处理
-    print("[INFO] Parallel processing...", flush=True)
-
-    # 准备无泄漏模式所需的训练集信息
+    # 准备无泄漏模式所需的训练集信息（在del df之前）
     train_idx_set = set(train_idx) if no_leakage and has_label else None
     train_label_map = None
     if no_leakage and has_label:
         train_labels = df.iloc[train_idx][label_col].values
         train_label_map = dict(zip(train_idx, train_labels))
+
+    del df
+
+    # 7. 并行处理
+    print("[INFO] Parallel processing...", flush=True)
 
     args_list = [
         (p_id, p.to_dict('list'), global_stats, entity_cols, card_col,
@@ -466,6 +471,10 @@ Examples:
                         help='训练集比例（默认: 0.7）')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子（默认: 42）')
+    parser.add_argument('--label-col', type=str, default=None,
+                        help='欺诈标签列名（如 isFraud, fraud, label）')
+    parser.add_argument('--fraud-value', type=int, default=1,
+                        help='表示欺诈的值（默认: 1）')
 
     args = parser.parse_args()
 
@@ -475,7 +484,8 @@ Examples:
 
     run_distributed(args.data, args.card_col, entity_cols, account_features,
                     transaction_features, args.workers, args.output_csv,
-                    args.no_leakage, args.train_ratio, args.seed)
+                    args.no_leakage, args.train_ratio, args.seed,
+                    args.label_col, args.fraud_value)
 
 
 if __name__ == '__main__':
