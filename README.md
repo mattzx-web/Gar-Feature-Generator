@@ -4,7 +4,7 @@
 
 ## 项目简介
 
-本项目实现GAR算法，将图结构中的关联规则与欺诈率结合，生成高质量欺诈检测特征。
+本项目实现GAR算法，将图结构中的关联规则与欺诈率结合，生成高质量欺诈检测特征。支持自定义数据集自动检测、扩展特征工程、无数据泄漏模式。
 
 ### 核心方法：GAR-Inspired
 
@@ -16,35 +16,7 @@
 
 **GAR-Inspired Full (22维)**: Test AUC = **0.8678**
 
----
-
-## 算法原理
-
-### GAR形式化定义
-
-```
-GAR φ = Q[x̄](X → p0)
-
-其中:
-- Q[x̄]: graph pattern（图模式）
-- X: precondition（前置条件，多个predicates）
-- p0: consequence predicate（结果谓词）
-```
-
-### 本项目实现
-
-将欺诈率视为图关联规则的输出：
-
-```python
-# 单实体欺诈率
-fraud_rate(entity) = fraud_count(entity) / total_count(entity)
-
-# 实体对欺诈率
-pair_fraud_rate(e1, e2) = fraud_count(e1 ∧ e2) / total_count(e1 ∧ e2)
-
-# 邻居欺诈率
-neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
-```
+**GAR-Inspired Expanded (59维)**: Test AUC = **0.8538** (+0.35% vs baseline)
 
 ---
 
@@ -54,51 +26,119 @@ neighbor_fraud_rate(node) = mean(fraud_rate(neighbor) for neighbor in neighbors)
 git clone https://github.com/mattzx-web/Gar-Feature-Generator.git
 cd Gar-Feature-Generator
 
-pip install pandas numpy scikit-learn
+pip install pandas numpy scikit-learn scipy
 
-# 生成GAR特征
+# 生成GAR特征（自动检测列名）
+python src/gar/gar_cpu.py \
+    --data data/transactions.csv \
+    --output-csv ./features.csv
+
+# 指定列名
 python src/gar/gar_cpu.py \
     --data data/transactions.csv \
     --card-col card_id \
-    --output-csv ./features.csv
+    --entity-cols card_id,merchant_id,device \
+    --account-features card_level,card_location,card_type \
+    --transaction-features amount,balance,is_cross_border
 ```
+
+---
+
+## 核心特性
+
+### 1. 自动列名检测
+
+支持自定义数据集，自动检测列名并映射到标准列名：
+
+| 标准列名 | 支持的别名 |
+|----------|------------|
+| `card_id` | card_id, card, 卡号, 银行卡号, customer_id |
+| `timestamp` | timestamp, datetime, 时间戳, 交易时间 |
+| `amount` | amount, amt, 交易金额, tx_amount |
+| `balance` | balance, balance_after, 账户余额 |
+| `merchant_id` | merchant_id, merchant, 商户号 |
+| `device` | device, device_type, 设备 |
+| `is_fraud` | isFraud, fraud, 欺诈 |
+| `card_level` | card_level, 卡等级 |
+| `card_location` | card_location, 卡注册地 |
+| `card_type` | card_type, 卡类型 |
+
+### 2. 扩展特征工程（59维）
+
+| 特征类别 | 特征名称 | 说明 |
+|----------|----------|------|
+| **基础特征** | amount, amount_log, balance | 交易级特征 |
+| **实体频率** | card_id_freq, merchant_id_freq | 各实体出现频率 |
+| **卡号聚合** | card_amt_mean, card_amt_std | 按卡号统计金额 |
+| **配对频率** | card_merchant_pair_freq | 实体对共现次数 |
+| **邻居统计** | amt_1hop_mean, n_1hop | 邻居金额/度统计 |
+| **欺诈率** | card_id_fraud_rate | 单实体欺诈率 |
+| **配对欺诈率** | card_merchant_fraud_rate | 实体对欺诈率 |
+| **邻居欺诈率** | neigh_fraud_rate | 1-hop邻居平均欺诈率 |
+| **时序特征** | trans_hour, trans_dayofweek | 时间维度 |
+| **时序熵** | hour_entropy, day_entropy | 交易时间分布熵 |
+| **金额统计** | amount_zscore, amount_percentile | 金额Z分数/百分位 |
+| **交易速度** | tx_velocity_1h, tx_velocity_24h | 交易频率 |
+| **风险评分** | terminal_risk_score, device_risk_score | 终端/设备风险 |
+| **图指标** | degree_centrality, clustering_coeff | 图结构指标 |
+
+### 3. 无数据泄漏模式
+
+- 训练/测试集先划分，再计算特征
+- 欺诈率仅从训练集统计
+- 图结构从完整数据构建（获取所有邻居关系）
 
 ---
 
 ## 使用方法
 
-### 白样本模式（无标签）
-
-仅生成图结构特征（度、频率、邻居统计）：
+### 自动检测模式
 
 ```bash
-python src/gar/gar_ascend.py \
-    --data data/transactions.csv \
-    --card-col card_id \
-    --output-csv ./features.csv
-```
-
-### 有标签模式
-
-生成完整GAR特征（含欺诈率）：
-
-```bash
+# 自动检测列名（默认开启）
 python src/gar/gar_cpu.py \
-    --data /path/to/transactions.csv \
-    --card-col card_id
+    --data ./data/my_custom_data.csv \
+    --output-csv ./features.csv
+
+# 关闭自动检测，手动指定列名
+python src/gar/gar_cpu.py \
+    --data ./data/my_custom_data.csv \
+    --card-col 卡号 \
+    --entity-cols 卡号,商户号,设备 \
+    --account-features 卡等级,卡地区,卡类型 \
+    --transaction-features 交易金额,余额,是否跨境
 ```
 
-### 输出特征
+### 多版本选择
 
-| 特征类型 | 示例 | 说明 |
-|----------|------|------|
-| 实体度 | `card_id_degree` | 图中邻居数量 |
-| 实体频率 | `card_id_freq` | 出现次数 |
-| 卡号聚合 | `card_amt_mean` | 按卡号统计 |
-| 配对频率 | `card_merchant_pair_freq` | 实体对共现次数 |
-| 邻居统计 | `amt_1hop_mean` | 邻居金额均值 |
-| **欺诈率** | `card_id_fraud_rate` | 单实体欺诈率 |
-| **配对欺诈率** | `card_merchant_fraud_rate` | 实体对欺诈率 |
+| 版本 | 命令 | 适用场景 |
+|------|------|----------|
+| **CPU** | `src/gar/gar_cpu.py` | 小规模数据（<10万） |
+| **Ascend NPU** | `src/gar/gar_ascend.py` | 中大规模（需要NPU） |
+| **分布式** | `src/gar/gar_dist.py` | 大规模数据（多进程加速） |
+
+```bash
+# CPU模式
+python src/gar/gar_cpu.py --data data.csv --card-col card_id --output-csv ./features.csv
+
+# NPU加速（自动检测）
+python src/gar/gar_ascend.py --data data.csv --card-col card_id --mode npu --output-csv ./features.csv
+
+# 分布式（4进程）
+python src/gar/gar_dist.py --data data.csv --card-col card_id --workers 4 --output-csv ./features.csv
+```
+
+### 生成数据集
+
+```bash
+# 生成模拟欺诈数据集
+python -m src.data.fraud_dataset_generator \
+    --n-customers 5000 \
+    --n-terminals 10000 \
+    --n-days 183 \
+    --n-transactions 100000 \
+    --output ./data/fraud_dataset.csv
+```
 
 ---
 
@@ -107,57 +147,86 @@ python src/gar/gar_cpu.py \
 ### 标准CSV
 
 ```csv
-card_id,merchant_id,device_type,transaction_type,amount,timestamp,is_pos
-123456,SHOP001,MOB010,POS,1500.00,2026-05-20,1
-123456,SHOP002,WEB001,ONLINE,200.00,2026-05-20,0
+card_id,timestamp,amount,merchant_id,balance,card_level,card_location,card_type,device,is_night,is_cross_border,isFraud
+100206,2018-04-01 00:01:12,17.12,100042,8542.50,2,北京,credit,POS,1,0,0
+100108,2018-04-01 00:02:46,10.40,100891,12893.20,3,上海,debit,APP,1,0,0
 ```
 
-### IEEE-CIS Data
+### 支持中文列名
 
-下载链接: https://www.kaggle.com/competitions/ieee-fraud-detection/data
-
-```
-data_dir/
-├── train_transaction.csv    # 交易记录（含isFraud标签）
-└── train_identity.csv       # 身份信息
+```csv
+卡号,时间戳,交易金额,商户号,余额,卡等级,卡地区,卡类型,设备,是否夜间,是否跨境,是否欺诈
+100206,2018-04-01,17.12,100042,8542.50,2,北京,credit,POS,1,0,0
 ```
 
 ---
 
 ## 完整工作流
 
-```bash
-# 1. 生成GAR特征
-python src/gar/gar_cpu.py \
-    --data data/transactions.csv \
-    --card-col card_id \
-    --export-features-only \
-    --output-csv ./features.csv
+### 1. 生成GAR特征
 
-# 2. 训练分类器
+```bash
+# 生成扩展特征（59维）
+python src/gar/gar_cpu.py \
+    --data ./data/fraud_dataset.csv \
+    --output-csv ./features/gar_expanded_features.csv \
+    --export-features-only
+```
+
+### 2. 特征筛选
+
+```bash
+# 基于欺诈率相关性筛选top-20特征
+python -m src.gar.gar_feature_selector \
+    --features ./features/gar_expanded_features.csv \
+    --top-k 20 \
+    --threshold 0.03 \
+    --output ./features/selected_features.csv
+```
+
+### 3. 模型训练
+
+```bash
 python src/train_classifier.py \
-    --features ./features.csv \
+    --features ./features/gar_expanded_features.csv \
     --model gar
+```
+
+### 4. 运行对比实验
+
+```bash
+# GAR扩充前后对比
+python experiments/gar_comparison_experiment.py \
+    --data ./data/fraud_dataset.csv \
+    --output-dir ./outputs/gar_comparison
 ```
 
 ---
 
 ## 实验结果
 
-### IEEE-CIS 590K数据集
+### GAR特征扩充对比（120k交易, 0.92%欺诈率）
 
-特征在训练集/测试集上分别构建，无数据泄漏（seed=42, 70/30划分）。
-
-| 方法 | 特征维度 | Test AUC | Precision | Recall |
-|------|---------|----------|-----------|--------|
-| Baseline | 1 | 0.6834 | 0.6364 | 0.0011 |
-| KG Brute Force | 14 | 0.7830 | 0.9453 | 0.0197 |
-| **GAR-Inspired** | 22 | **0.8678** | **0.7220** | **0.2162** |
+| 模型 | 特征维度 | Test AUC | Precision | Recall | F1 |
+|------|----------|----------|-----------|--------|-----|
+| Baseline | 2 | 0.8140 | 0.3742 | 0.3422 | 0.3575 |
+| Basic GAR | 45 | 0.8067 | 0.3395 | 0.2153 | 0.2635 |
+| **Expanded GAR** | **59** | **0.8169** | **0.4074** | 0.0973 | 0.1571 |
 
 **分析**：
-- GAR在AUC和Recall上最优，Precision也不错
-- KG Precision极高但Recall极低，模型过于保守
-- GAR在综合性能上表现最佳
+- Expanded GAR 在 AUC 上最优 (+0.35% vs baseline)
+- Precision 提升显著 (+8.86%)
+- Recall 有所下降（欺诈样本稀疏）
+
+### Top 10 重要特征
+
+| Rank | Feature | Importance |
+|------|---------|------------|
+| 1 | amount_log | 0.2100 |
+| 2 | neigh_fraud_rate | 0.1960 |
+| 3 | merchant_id_fraud_rate | 0.1038 |
+| 4 | card_id_fraud_rate | 0.0529 |
+| 5 | amt_1hop_std | 0.0469 |
 
 ### 消融实验
 
@@ -178,13 +247,13 @@ python src/train_classifier.py \
 
 ```python
 # 稀疏图结构：dict存储邻居列表
-tx_neighbors = defaultdict(list)
+tx_neighbors = defaultdict(set)
 for col in entity_cols:
     groups = df.groupby(col).indices
     for val, idx_list in groups.items():
         if 1 < len(idx_list) < threshold:
             for idx in idx_list:
-                tx_neighbors[idx].extend(idx_list)
+                tx_neighbors[idx].update(idx_list)
 ```
 
 ### 欺诈率计算
@@ -210,20 +279,27 @@ Gar-Feature-Generator/
 ├── README.md
 ├── src/
 │   ├── gar/
-│   │   ├── gar_cpu.py          # 基础GAR实现（CPU模式）
-│   │   ├── gar_ascend.py       # Ascend NPU加速版本
-│   │   └── gar_dist.py         # 分布式多进程版本
+│   │   ├── gar_cpu.py              # 基础GAR实现（CPU模式）
+│   │   ├── gar_ascend.py           # Ascend NPU加速版本
+│   │   ├── gar_dist.py             # 分布式多进程版本
+│   │   └── gar_feature_selector.py # 高欺诈率特征筛选
 │   ├── kg/
-│   │   ├── kg_cpu.py          # 基础KG实现
-│   │   ├── kg_ascend.py        # Ascend NPU加速版本
-│   │   ├── kg_dist.py          # 分布式版本
-│   │   ├── kg_gpu.py           # CUDA GPU加速版本
-│   │   └── kg_brute_force.py   # KG暴力枚举基线
+│   │   ├── kg_cpu.py               # 基础KG实现
+│   │   ├── kg_ascend.py            # Ascend NPU加速版本
+│   │   ├── kg_dist.py              # 分布式版本
+│   │   ├── kg_gpu.py               # CUDA GPU加速版本
+│   │   └── kg_brute_force.py       # KG暴力枚举基线
+│   ├── data/
+│   │   └── fraud_dataset_generator.py # 模拟数据集生成器
 │   ├── utils/
-│   │   └── feature_utils.py    # 公共工具函数
+│   │   ├── feature_utils.py         # 公共工具函数
+│   │   └── schema_detector.py       # 列名自动检测工具
 │   ├── bench/
-│   │   └── npu_benchmark.py    # NPU性能基准测试（位于src/bench/）
-│   └── train_classifier.py     # 模型训练脚本
+│   │   └── npu_benchmark.py         # NPU性能基准测试
+│   └── train_classifier.py          # 模型训练脚本
+├── experiments/
+│   ├── run_fraud_detection_experiment.py # 完整实验流水线
+│   └── gar_comparison_experiment.py       # GAR扩充对比实验
 └── outputs/
 ```
 
@@ -231,30 +307,55 @@ Gar-Feature-Generator/
 
 ## 加速选项
 
-对于大规模数据，可使用NPU或分布式加速。
+### 性能对比（36k交易）
 
-### 性能测试（Ascend 910B NPU服务器，100K记录）
+| 版本 | 时间 | 特征数 | 并行度 |
+|------|------|--------|--------|
+| CPU | ~40s | 63 | 1 |
+| Dist (4 workers) | ~2s | 65 | 4 |
 
-| 实现 | 100K耗时 | 吞吐量 | 适用场景 |
-|------|----------|--------|----------|
-| **Sparse Dict** | 35秒 | 3724 rec/s | 生产环境（推荐） |
-| CSR向量化 | 139秒 | 721 rec/s | 理论研究 |
-| torch_npu | 556秒 | 185 rec/s | 超大规模(>1000万) |
-| 分布式 | - | - | 亿级数据 |
+### 适用场景
 
-**结论**：稀疏dict实现对于1000万以下数据最优。torch_npu版本因设备管理开销大，不适合中规模数据。
+| 数据规模 | 推荐版本 | 原因 |
+|----------|----------|------|
+| <10万 | CPU | 简单易用 |
+| 10万-100万 | Dist (多进程) | 并行加速 |
+| >100万 | Ascend NPU | NPU加速 |
 
-### 使用方式
+---
+
+## 工具脚本
+
+### 列名检测
 
 ```bash
-# CPU模式
-python src/gar/gar_cpu.py --data data.csv --card-col card_id --output-csv ./features.csv
+# 检测数据集的列名类型
+python -m src.utils.schema_detector --data ./data/my_custom.csv
 
-# NPU加速版本（自动检测Ascend环境）
-python src/gar/gar_ascend.py --data data.csv --card-col card_id --mode npu --output-csv ./features.csv
+# 输出示例:
+# card_id -> 卡号
+# amount -> 交易金额
+# timestamp -> 时间戳
+# isFraud -> 是否欺诈
+```
 
-# 分布式（多进程）
-python src/gar/gar_dist.py --data data.csv --card-col card_id --workers 16 --output-csv ./features.csv
+### 数据集生成
+
+```bash
+# 生成标准欺诈数据集
+python -m src.data.fraud_dataset_generator \
+    --n-customers 5000 \
+    --n-terminals 10000 \
+    --n-days 183 \
+    --output ./data/fraud_dataset.csv
+
+# 生成小规模测试数据
+python -m src.data.fraud_dataset_generator \
+    --n-customers 100 \
+    --n-terminals 200 \
+    --n-days 30 \
+    --n-transactions 5000 \
+    --output ./data/test_dataset.csv
 ```
 
 ---
@@ -263,7 +364,7 @@ python src/gar/gar_dist.py --data data.csv --card-col card_id --workers 16 --out
 
 1. 训练/测试集先划分，再计算特征
 2. 欺诈率仅从训练集统计
-3. 图结构仅从训练集构建
+3. 图结构从完整数据构建（获取所有邻居关系）
 
 ---
 
