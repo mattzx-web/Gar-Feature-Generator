@@ -74,7 +74,7 @@ def auto_detect_schema(df):
     detected = {}
     used_columns = set()
 
-    # 按优先级检测
+    # 按优先级检测 - 更精确的匹配
     priority_order = ['card_id', 'amount', 'timestamp', 'is_fraud', 'merchant_id',
                       'terminal_id', 'device', 'balance', 'is_night', 'is_cross_border',
                       'card_level', 'card_location', 'card_type', 'merchant_type']
@@ -83,8 +83,19 @@ def auto_detect_schema(df):
         aliases = COLUMN_ALIASES.get(col_type, [])
         for alias in aliases:
             for col in df.columns:
-                if col.lower() == alias.lower() or alias.lower() in col.lower():
-                    if col not in used_columns:
+                if col not in used_columns:
+                    col_lower = col.lower()
+                    alias_lower = alias.lower()
+                    # 精确匹配优先
+                    if col_lower == alias_lower:
+                        detected[col_type] = col
+                        used_columns.add(col)
+                        break
+                    # 然后检查是否包含（但避免card_level被误判为card_id）
+                    elif alias_lower in col_lower:
+                        # 特殊处理：card_id不应该匹配card_level/card_type等
+                        if col_type == 'card_id' and ('level' in col_lower or 'type' in col_lower or 'location' in col_lower):
+                            continue
                         detected[col_type] = col
                         used_columns.add(col)
                         break

@@ -63,8 +63,16 @@ def auto_detect_schema(df):
         aliases = COLUMN_ALIASES.get(col_type, [])
         for alias in aliases:
             for col in df.columns:
-                if col.lower() == alias.lower() or alias.lower() in col.lower():
-                    if col not in used_columns:
+                if col not in used_columns:
+                    col_lower = col.lower()
+                    alias_lower = alias.lower()
+                    if col_lower == alias_lower:
+                        detected[col_type] = col
+                        used_columns.add(col)
+                        break
+                    elif alias_lower in col_lower:
+                        if col_type == 'card_id' and ('level' in col_lower or 'type' in col_lower or 'location' in col_lower):
+                            continue
                         detected[col_type] = col
                         used_columns.add(col)
                         break
@@ -452,7 +460,8 @@ def split_data(df, train_ratio=0.7, seed=42):
 def run_distributed(data_path, card_col, entity_cols, account_features,
                     transaction_features, n_workers, output_csv,
                     no_leakage=True, train_ratio=0.7, seed=42,
-                    label_col=None, fraud_value=1, train_idx=None):
+                    label_col=None, fraud_value=1, train_idx=None,
+                    auto_detect=True):
     """分布式GAR特征生成"""
     print(f"[MODE] Distributed GAR ({n_workers} workers)", flush=True)
     if no_leakage:
@@ -464,7 +473,30 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
     # 1. 加载全部数据
     print("[INFO] Loading data...", flush=True)
     df = pd.read_csv(data_path)
-    print(f"[INFO] Total records: {len(df)}", flush=True)
+    print(f"[INFO] Total records: {len(df)}, columns: {len(df.columns)}", flush=True)
+
+    # 自动检测列名
+    if auto_detect:
+        schema = auto_detect_schema(df)
+        print(f"[INFO] Auto-detected columns:", flush=True)
+        for col_type, actual_col in schema.items():
+            print(f"  {col_type:<20} -> {actual_col}", flush=True)
+
+        # 更新参数
+        if card_col in schema:
+            card_col = schema['card_id']
+        if not entity_cols or entity_cols == DEFAULT_ENTITY_COLS:
+            entity_cols = [v for k, v in schema.items() if k in ['card_id', 'merchant_id', 'terminal_id', 'device', 'is_night']]
+            if entity_cols:
+                print(f"[INFO] Updated entity_cols: {entity_cols}", flush=True)
+        if not account_features or account_features == DEFAULT_ACCOUNT_FEATURES:
+            account_features = [v for k, v in schema.items() if k in ['card_level', 'card_location', 'card_type']]
+            if account_features:
+                print(f"[INFO] Updated account_features: {account_features}", flush=True)
+        if not transaction_features or transaction_features == DEFAULT_TRANSACTION_FEATURES:
+            transaction_features = [v for k, v in schema.items() if k in ['amount', 'balance', 'is_cross_border']]
+            if transaction_features:
+                print(f"[INFO] Updated transaction_features: {transaction_features}", flush=True)
 
     # 2. 预处理
     for col in entity_cols:
@@ -472,6 +504,14 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
             df[col] = df[col].fillna(-1)
             if df[col].dtype == 'object':
                 df[col] = pd.factorize(df[col].astype(str))[0]
+
+    # 填充交易级和账户级特征的缺失值
+    for col in account_features + transaction_features:
+        if col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].fillna('missing')
+            else:
+                df[col] = df[col].fillna(0)
 
     # 检测标签
     has_label = False
@@ -635,7 +675,7 @@ Examples:
     run_distributed(args.data, args.card_col, entity_cols, account_features,
                     transaction_features, args.workers, args.output_csv,
                     args.no_leakage, args.train_ratio, args.seed,
-                    args.label_col, args.fraud_value, train_idx)
+                    args.label_col, args.fraud_value, None, args.auto_detect)
 
 
 if __name__ == '__main__':

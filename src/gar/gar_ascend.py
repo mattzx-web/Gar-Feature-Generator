@@ -95,8 +95,16 @@ def auto_detect_schema(df):
         aliases = COLUMN_ALIASES.get(col_type, [])
         for alias in aliases:
             for col in df.columns:
-                if col.lower() == alias.lower() or alias.lower() in col.lower():
-                    if col not in used_columns:
+                if col not in used_columns:
+                    col_lower = col.lower()
+                    alias_lower = alias.lower()
+                    if col_lower == alias_lower:
+                        detected[col_type] = col
+                        used_columns.add(col)
+                        break
+                    elif alias_lower in col_lower:
+                        if col_type == 'card_id' and ('level' in col_lower or 'type' in col_lower or 'location' in col_lower):
+                            continue
                         detected[col_type] = col
                         used_columns.add(col)
                         break
