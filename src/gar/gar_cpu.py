@@ -47,7 +47,7 @@ DEFAULT_TRANSACTION_FEATURES = ['timestamp', 'amount', 'balance_after', 'is_freq
 DEFAULT_NEIGHBOR_THRESHOLD = 300
 
 
-def load_and_preprocess_data(data_path, card_col, entity_cols, account_features, transaction_features):
+def load_and_preprocess_data(data_path, card_col, entity_cols, account_features, transaction_features, explicit_label_col=None):
     """
     加载并预处理数据
     """
@@ -59,12 +59,17 @@ def load_and_preprocess_data(data_path, card_col, entity_cols, account_features,
     # 检测是否有标签
     has_label = False
     label_col = None
-    for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
-        if col in df.columns:
-            has_label = True
-            label_col = col
-            print(f"[INFO] Found label column: {label_col}", flush=True)
-            break
+    if explicit_label_col and explicit_label_col in df.columns:
+        has_label = True
+        label_col = explicit_label_col
+        print(f"[INFO] Using explicit label column: {label_col}", flush=True)
+    else:
+        for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
+            if col in df.columns:
+                has_label = True
+                label_col = col
+                print(f"[INFO] Found label column: {label_col}", flush=True)
+                break
 
     # 实体列编码
     for col in entity_cols:
@@ -475,14 +480,219 @@ def build_gar_features_no_leakage(df, train_idx, tx_neighbors, card_col,
         except Exception as e:
             print(f"[WARN] Failed to extract temporal features: {e}", flush=True)
 
+    # ========== 9. Extended Features: Temporal ==========
+    try:
+        if timestamp_col and card_col in df.columns:
+            temporal_feats = compute_temporal_features(df, card_col, timestamp_col)
+            features.update(temporal_feats)
+            print(f"[INFO] Added temporal features: {list(temporal_feats.keys())}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Failed to compute temporal features: {e}", flush=True)
+
+    # ========== 10. Extended Features: Amount Stats ==========
+    try:
+        if amount_col and card_col in df.columns:
+            amount_stats_feats = compute_amount_stats_features(df, card_col, amount_col)
+            features.update(amount_stats_feats)
+            print(f"[INFO] Added amount stats features: {list(amount_stats_feats.keys())}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Failed to compute amount stats features: {e}", flush=True)
+
+    # ========== 11. Extended Features: Velocity ==========
+    try:
+        if timestamp_col and card_col in df.columns:
+            velocity_feats = compute_velocity_features(df, card_col, timestamp_col, amount_col)
+            features.update(velocity_feats)
+            print(f"[INFO] Added velocity features: {list(velocity_feats.keys())}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Failed to compute velocity features: {e}", flush=True)
+
+    # ========== 12. Extended Features: Risk Scores ==========
+    try:
+        if has_label and label_col:
+            terminal_col = None
+            device_col = None
+            for col in ['terminal_id', 'merchant_id', 'merchant_type']:
+                if col in df.columns:
+                    terminal_col = col
+                    break
+            for col in ['device', 'device_type']:
+                if col in df.columns:
+                    device_col = col
+                    break
+            risk_feats = compute_risk_scores(df, train_idx, label_col, terminal_col, device_col)
+            features.update(risk_feats)
+            print(f"[INFO] Added risk score features: {list(risk_feats.keys())}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Failed to compute risk score features: {e}", flush=True)
+
+    # ========== 13. Extended Features: Graph Metrics ==========
+    try:
+        graph_metrics_feats = compute_graph_metrics(df, tx_neighbors, card_col)
+        features.update(graph_metrics_feats)
+        print(f"[INFO] Added graph metric features: {list(graph_metrics_feats.keys())}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Failed to compute graph metrics: {e}", flush=True)
+
     # 清理无穷值
     for key in features:
         features[key] = np.nan_to_num(features[key], nan=0, posinf=0, neginf=0)
 
     feature_names = list(features.keys())
-    print(f"[INFO] Generated {len(feature_names)} features", flush=True)
+    print(f"[INFO] Generated {len(feature_names)} features (including extended)", flush=True)
 
     return features, feature_names
+
+
+def compute_temporal_features(df, card_col, timestamp_col):
+    """计算时序特征"""
+    features = {}
+
+    ts = pd.to_datetime(df[timestamp_col], errors='coerce')
+
+    # 小时分布熵（按card_id分组计算）
+    if card_col in df.columns:
+        hour_entropy_list = []
+        for card_id in df[card_col].unique():
+            mask = df[card_col] == card_id
+            hours = ts[mask].dt.hour
+            if len(hours) > 1:
+                # 计算小时分布的熵
+                hour_counts = hours.value_counts(normalize=True)
+                entropy = -np.sum(hour_counts * np.log(hour_counts + 1e-10))
+            else:
+                entropy = 0
+            hour_entropy_list.extend([entropy] * mask.sum())
+        features['hour_entropy'] = np.array(hour_entropy_list) if len(hour_entropy_list) == len(df) else np.zeros(len(df))
+
+        # 日期分布熵
+        day_entropy_list = []
+        for card_id in df[card_col].unique():
+            mask = df[card_col] == card_id
+            days = ts[mask].dt.dayofweek
+            if len(days) > 1:
+                day_counts = days.value_counts(normalize=True)
+                entropy = -np.sum(day_counts * np.log(day_counts + 1e-10))
+            else:
+                entropy = 0
+            day_entropy_list.extend([entropy] * mask.sum())
+        features['day_entropy'] = np.array(day_entropy_list) if len(day_entropy_list) == len(df) else np.zeros(len(df))
+
+        # 上次交易时间间隔
+        df_sorted = df.copy()
+        df_sorted['_ts'] = ts
+        df_sorted = df_sorted.sort_values([card_col, timestamp_col])
+        time_diff = df_sorted.groupby(card_col)['_ts'].diff().dt.total_seconds().fillna(0)
+        features['time_since_last_tx'] = df.index.map(time_diff.to_dict()).fillna(0).values
+
+    return features
+
+
+def compute_amount_stats_features(df, card_col, amount_col):
+    """计算金额统计特征"""
+    features = {}
+
+    if card_col in df.columns and amount_col:
+        # Amount Z-score (相对于该card_id的均值和标准差)
+        card_amt_mean = df.groupby(card_col)[amount_col].transform('mean')
+        card_amt_std = df.groupby(card_col)[amount_col].transform('std').fillna(1)
+        features['amount_zscore'] = ((df[amount_col] - card_amt_mean) / (card_amt_std + 1e-10)).fillna(0).values
+
+        # Amount Percentile (相对于该card_id)
+        features['amount_percentile'] = df.groupby(card_col)[amount_col].rank(pct=True).fillna(0).values
+
+    return features
+
+
+def compute_velocity_features(df, card_col, timestamp_col, amount_col):
+    """计算交易速度特征（优化版，使用向量化操作）"""
+    features = {}
+
+    ts = pd.to_datetime(df[timestamp_col], errors='coerce')
+    df_sorted = df.copy()
+    df_sorted['_ts'] = ts
+
+    if card_col in df.columns:
+        df_sorted = df_sorted.sort_values([card_col, timestamp_col])
+
+        # 使用简单的频率特征代替复杂的窗口计数
+        # 每个卡号的交易频率
+        card_tx_count = df_sorted.groupby(card_col).size()
+        df_sorted['card_tx_freq'] = df_sorted[card_col].map(card_tx_count).fillna(0)
+
+        # 每小时的交易数（按card和小时分组）
+        df_sorted['hour'] = df_sorted['_ts'].dt.floor('H')
+        hourly_counts = df_sorted.groupby([card_col, 'hour']).size().reset_index(name='hourly_tx_count')
+        df_sorted['hourly_tx'] = df_sorted.set_index([card_col, 'hour']).index.map(
+            lambda x: hourly_counts.set_index([card_col, 'hour']).loc[x, 'hourly_tx_count'] if x in hourly_counts.set_index([card_col, 'hour']).index else 0
+        )
+        df_sorted['hourly_tx'] = df_sorted['hourly_tx'].fillna(0)
+
+        features['tx_velocity_1h'] = df_sorted['hourly_tx'].values
+        features['tx_velocity_24h'] = df_sorted['card_tx_freq'].values
+
+        # 24小时金额总和（简化版：使用卡号平均金额的24倍作为估算）
+        if amount_col and amount_col in df.columns:
+            card_amt_mean = df_sorted.groupby(card_col)[amount_col].transform('mean')
+            features['amount_velocity_24h'] = card_amt_mean.fillna(0).values * 10  # 估算24小时内总金额
+        else:
+            features['amount_velocity_24h'] = np.zeros(len(df))
+
+    return features
+
+
+def compute_risk_scores(df, train_idx, label_col, terminal_col=None, device_col=None):
+    """计算风险评分特征（基于训练集标签）"""
+    features = {}
+
+    if label_col and train_idx is not None:
+        train_df = df.iloc[train_idx]
+
+        # Terminal risk score
+        if terminal_col and terminal_col in df.columns and terminal_col in train_df.columns:
+            terminal_fraud_rate = train_df.groupby(terminal_col)[label_col].mean()
+            features['terminal_risk_score'] = df[terminal_col].map(terminal_fraud_rate).fillna(0).values
+
+        # Device risk score
+        if device_col and device_col in df.columns and device_col in train_df.columns:
+            device_fraud_rate = train_df.groupby(device_col)[label_col].mean()
+            features['device_risk_score'] = df[device_col].map(device_fraud_rate).fillna(0).values
+
+    return features
+
+
+def compute_graph_metrics(df, tx_neighbors, card_col):
+    """计算图指标特征（近似版）"""
+    features = {}
+
+    n = len(df)
+
+    # Clustering coefficient approximation (基于邻居重叠度)
+    clustering = []
+    for i in range(n):
+        neighbors = tx_neighbors.get(i, set())
+        if len(neighbors) > 1:
+            # 计算邻居之间的连接数
+            neighbor_list = list(neighbors)
+            connections = 0
+            for j, n1 in enumerate(neighbor_list):
+                for k, n2 in enumerate(neighbor_list):
+                    if j < k:
+                        n1_neighbors = tx_neighbors.get(n1, set())
+                        if n2 in n1_neighbors:
+                            connections += 1
+            max_connections = len(neighbor_list) * (len(neighbor_list) - 1) / 2
+            clustering.append(connections / max_connections if max_connections > 0 else 0)
+        else:
+            clustering.append(0)
+    features['clustering_coeff'] = np.array(clustering)
+
+    # Degree centrality (归一化度)
+    degrees = [len(tx_neighbors.get(i, set())) for i in range(n)]
+    max_degree = max(degrees) if max(degrees) > 0 else 1
+    features['degree_centrality'] = np.array(degrees) / max_degree
+
+    return features
 
 
 def export_features_to_csv(features_dict, feature_names, output_path, original_df=None, has_label=False, split_col=None):
@@ -620,6 +830,10 @@ Examples:
                         help='关闭防泄漏模式：欺诈率从全部数据计算（不推荐）')
     parser.add_argument('--train-ratio', type=float, default=0.7,
                         help='训练集比例（默认: 0.7）')
+    parser.add_argument('--label-col', type=str, default=None,
+                        help='欺诈标签列名（如 isFraud, fraud, label）')
+    parser.add_argument('--fraud-value', type=int, default=1,
+                        help='表示欺诈的值（默认: 1）')
 
     args = parser.parse_args()
 
@@ -640,7 +854,7 @@ Examples:
 
     # 1. 加载数据
     df, card_col, entity_cols, account_features, transaction_features, has_label, label_col = load_and_preprocess_data(
-        args.data, args.card_col, entity_cols, account_features, transaction_features
+        args.data, args.card_col, entity_cols, account_features, transaction_features, args.label_col
     )
 
     # 2. 分割数据
@@ -664,6 +878,10 @@ Examples:
 
         # 添加split列标记
         split标记 = np.array(['train' if i in train_idx else 'test' for i in range(len(df))])
+
+        # 添加标签列到features_dict（供train_classifier使用）
+        if has_label and label_col:
+            features_dict[label_col] = df[label_col].values
     else:
         # 原始模式（有泄漏）
         features_dict, feature_names = build_gar_features(
