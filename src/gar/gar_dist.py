@@ -23,6 +23,12 @@ import argparse
 from datetime import datetime
 import time
 
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+
 sys.stdout.reconfigure(line_buffering=True)
 
 DEFAULT_CARD_COL = 'card_id'
@@ -299,8 +305,9 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
 
         # Neighbor Fraud Rate (无泄漏模式：仅使用训练集邻居的标签)
         neigh_fraud_rates = np.zeros(n, dtype=np.float32)
+        range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Neighbor fraud")
         if has_label and no_leakage and train_label_map:
-            for i in range(n):
+            for i in range_iter:
                 neighs = tx_neighbors.get(i, set())
                 if neighs:
                     train_neighs = [n for n in neighs if n in train_idx_set]
@@ -309,7 +316,7 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
         elif has_label:
             # 泄漏模式：使用全量标签（不推荐）
             labels = df[label_col].values
-            for i in range(n):
+            for i in range_iter:
                 neighs = tx_neighbors.get(i, set())
                 if neighs:
                     neigh_fraud_rates[i] = labels[list(neighs)].mean()
@@ -328,7 +335,9 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
             if not ts.isna().all():
                 # hour entropy
                 hour_entropy_list = []
-                for card_id in df[card_col].unique():
+                unique_cards = df[card_col].unique()
+                cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Hour entropy")
+                for card_id in cards_iter:
                     mask = df[card_col] == card_id
                     hours = ts[mask].dt.hour
                     if len(hours) > 1:
@@ -341,7 +350,9 @@ def build_gar_features(df, tx_neighbors, global_stats, entity_cols, card_col,
 
                 # day entropy
                 day_entropy_list = []
-                for card_id in df[card_col].unique():
+                unique_cards = df[card_col].unique()
+                cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Day entropy")
+                for card_id in cards_iter:
                     mask = df[card_col] == card_id
                     days = ts[mask].dt.dayofweek
                     if len(days) > 1:
@@ -577,7 +588,10 @@ def run_distributed(data_path, card_col, entity_cols, account_features,
     ]
 
     with Pool(n_workers) as pool:
-        results = pool.map(process_partition, args_list)
+        if TQDM_AVAILABLE:
+            results = list(tqdm(pool.imap(process_partition, args_list), total=len(args_list), desc="[Dist] Workers"))
+        else:
+            results = pool.map(process_partition, args_list)
 
     # 8. 合并
     print("[INFO] Merging results...", flush=True)

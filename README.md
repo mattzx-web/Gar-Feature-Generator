@@ -26,9 +26,9 @@
 git clone https://github.com/mattzx-web/Gar-Feature-Generator.git
 cd Gar-Feature-Generator
 
-pip install pandas numpy scikit-learn scipy
+pip install pandas numpy scikit-learn scipy tqdm
 
-# 生成GAR特征（自动检测列名）
+# 生成GAR特征（自动检测列名 + 无泄漏模式）
 python src/gar/gar_cpu.py \
     --data data/transactions.csv \
     --output-csv ./features.csv
@@ -40,6 +40,13 @@ python src/gar/gar_cpu.py \
     --entity-cols card_id,merchant_id,device \
     --account-features card_level,card_location,card_type \
     --transaction-features amount,balance,is_cross_border
+
+# 分布式模式（多进程加速）
+python src/gar/gar_dist.py \
+    --data data/transactions.csv \
+    --card-col card_id \
+    --workers 4 \
+    --output-csv ./features.csv
 ```
 
 ---
@@ -87,6 +94,12 @@ python src/gar/gar_cpu.py \
 - 训练/测试集先划分，再计算特征
 - 欺诈率仅从训练集统计
 - 图结构从完整数据构建（获取所有邻居关系）
+- 导出的CSV包含`split`列，标记每条记录属于train还是test
+
+### 4. 进度条显示
+
+- 所有版本支持`tqdm`进度条
+- 未安装时自动跳过，不影响功能
 
 ---
 
@@ -113,20 +126,25 @@ python src/gar/gar_cpu.py \
 
 | 版本 | 命令 | 适用场景 |
 |------|------|----------|
-| **CPU** | `src/gar/gar_cpu.py` | 小规模数据（<10万） |
-| **Ascend NPU** | `src/gar/gar_ascend.py` | 中大规模（需要NPU） |
-| **分布式** | `src/gar/gar_dist.py` | 大规模数据（多进程加速） |
+| **CPU** | `src/gar/gar_cpu.py` | 小规模数据（<10万），功能完整 |
+| **Ascend NPU** | `src/gar/gar_ascend.py` | 中大规模（需要NPU），无泄漏模式 |
+| **分布式** | `src/gar/gar_dist.py` | 大规模数据（多进程加速），无泄漏模式 |
 
 ```bash
-# CPU模式
+# CPU模式（无泄漏，默认）
 python src/gar/gar_cpu.py --data data.csv --card-col card_id --output-csv ./features.csv
 
-# NPU加速（自动检测）
-python src/gar/gar_ascend.py --data data.csv --card-col card_id --mode npu --output-csv ./features.csv
+# NPU加速（无泄漏模式，自动检测列名）
+python src/gar/gar_ascend.py --data data.csv --card-col card_id --output-csv ./features.csv
 
-# 分布式（4进程）
+# 分布式（4进程，无泄漏）
 python src/gar/gar_dist.py --data data.csv --card-col card_id --workers 4 --output-csv ./features.csv
+
+# 关闭无泄漏模式（不推荐）
+python src/gar/gar_cpu.py --data data.csv --leakage --output-csv ./features.csv
 ```
+
+**进度条支持**：所有版本支持`tqdm`进度条（自动检测，未安装时正常执行）
 
 ### 生成数据集
 
@@ -163,17 +181,27 @@ card_id,timestamp,amount,merchant_id,balance,card_level,card_location,card_type,
 
 ## 完整工作流
 
-### 1. 生成GAR特征
+### 1. 生成GAR特征（自动导出split列）
 
 ```bash
-# 生成扩展特征（59维）
+# 生成扩展特征（59维），自动分割训练/测试集并导出
 python src/gar/gar_cpu.py \
     --data ./data/fraud_dataset.csv \
     --output-csv ./features/gar_expanded_features.csv \
     --export-features-only
+
+# 输出文件包含 split 列（train/test）和 isFraud 标签列
+# 可直接用于后续模型训练
 ```
 
-### 2. 特征筛选
+**输出文件格式：**
+```csv
+card_id,amount,amount_log,...,isFraud,split
+100206,17.12,2.84,...,0,train
+100108,10.40,2.44,...,1,test
+```
+
+### 2. 特征筛选（可选）
 
 ```bash
 # 基于欺诈率相关性筛选top-20特征
@@ -184,12 +212,19 @@ python -m src.gar.gar_feature_selector \
     --output ./features/selected_features.csv
 ```
 
-### 3. 模型训练
+### 3. 模型训练（使用导出的split列）
+
+生成的特征文件已包含 `split` 列，直接用于训练：
 
 ```bash
+# 直接使用gar_cpu.py内置分类器（自动使用split列）
+python src/gar/gar_cpu.py \
+    --data ./data/fraud_dataset.csv
+
+# 或使用独立训练脚本
 python src/train_classifier.py \
     --features ./features/gar_expanded_features.csv \
-    --model gar
+    --split-col split
 ```
 
 ### 4. 运行对比实验

@@ -2,19 +2,19 @@
 Ascend NPU加速GAR特征生成器
 
 支持Ascend NPU卡加速，处理千万到亿级交易记录。
+支持无数据泄漏模式。
 
 用法:
-    # Ascend NPU模式
-    python src/gar_feature_generator_ascend.py --data /path/to/data.csv \\
-                                               --card-col card_id \\
-                                               --npu-id 0 \\
-                                               --output-csv ./features.csv
+    # Ascend NPU模式（无泄漏）
+    python src/gar/gar_ascend.py --data /path/to/data.csv \\
+                                 --card-col card_id \\
+                                 --output-csv ./features.csv
 
     # 多NPU分布式
-    python src/gar_feature_generator_ascend.py --data /path/to/large_data.csv \\
-                                                 --npus 0,1,2,3 \\
-                                                 --workers 4 \\
-                                                 --output-csv ./features.csv
+    python src/gar/gar_ascend.py --data /path/to/large_data.csv \\
+                                 --npus 0,1,2,3 \\
+                                 --workers 4 \\
+                                 --output-csv ./features.csv
 """
 
 import pandas as pd
@@ -25,6 +25,12 @@ import sys
 import argparse
 import time
 import subprocess
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -187,8 +193,41 @@ def build_graph(df, entity_cols, neighbor_threshold=300):
     return tx_neighbors
 
 
+def split_data(df, train_ratio=0.7, seed=42):
+    """分割训练集和测试集"""
+    n = len(df)
+    indices = np.arange(n)
+    np.random.seed(seed)
+    np.random.shuffle(indices)
+    n_train = int(train_ratio * n)
+    train_idx = indices[:n_train]
+    test_idx = indices[n_train:]
+    return train_idx, test_idx
+
+
+def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
+    """从训练集计算欺诈率映射（避免数据泄漏）"""
+    entity_fraud_maps = {}
+    for col in entity_cols:
+        if col in train_df.columns:
+            entity_fraud_maps[col] = train_df.groupby(col)[label_col].mean().to_dict()
+
+    pair_fraud_maps = {}
+    for i, col1 in enumerate(entity_cols[:4]):
+        for col2 in entity_cols[i+1:5]:
+            if col1 not in train_df.columns or col2 not in train_df.columns:
+                continue
+            pair_df = train_df[[col1, col2, label_col]].copy()
+            pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
+            pair_fraud_maps[f'{col1}_{col2}'] = pair_df.groupby('_pair')[label_col].mean().to_dict()
+
+    return entity_fraud_maps, pair_fraud_maps
+
+
 def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, card_col,
-                                  account_features, transaction_features, has_label, label_col):
+                                  account_features, transaction_features, has_label, label_col,
+                                  entity_fraud_maps=None, pair_fraud_maps=None,
+                                  no_leakage=False, train_idx_set=None, train_label_map=None):
     """构建GAR特征（优化版本：向量化+稀疏图）"""
 
     features = {}
@@ -325,32 +364,60 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
                 pass
             break
 
-    # ========== 8. GAR Fraud Rate特征 ==========
+       # ========== 8. GAR Fraud Rate特征（无泄漏模式） ==========
     if has_label and label_col:
-        labels = df[label_col].values
+        if no_leakage and entity_fraud_maps:
+            # 无泄漏模式：使用预计算的欺诈率映射
+            print("[INFO] Using pre-computed fraud rates from TRAIN ONLY (no leakage)", flush=True)
+            for col in entity_cols:
+                if col not in df_columns or col not in entity_fraud_maps:
+                    continue
+                features[f'{col}_fraud_rate'] = np.array([entity_fraud_maps[col].get(v, 0) for v in df[col].values], dtype=np.float32)
 
-        for col in entity_cols:
-            if col not in df_columns:
-                continue
-            fraud_map = df.groupby(col)[label_col].mean().to_dict()
-            features[f'{col}_fraud_rate'] = np.array([fraud_map.get(v, 0) for v in df[col].values], dtype=np.float32)
-
-        for i, col1 in enumerate(entity_cols[:4]):
-            for col2 in entity_cols[i+1:5]:
+            for col_pair, fraud_map in pair_fraud_maps.items():
+                col1, col2 = col_pair.split('_', 1)
                 if col1 not in df_columns or col2 not in df_columns:
                     continue
-                pair_df = df[[col1, col2, label_col]].copy()
-                pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
-                fraud_map = pair_df.groupby('_pair')[label_col].mean().to_dict()
-                pair_values = df[col1].astype(str) + '_' + df[col2].astype(str)
+                pair_values = (df[col1].astype(str) + '_' + df[col2].astype(str)).values
                 features[f'{col1}_{col2}_pair_fraud_rate'] = np.array([fraud_map.get(p, 0) for p in pair_values], dtype=np.float32)
 
-        neigh_fraud_rates = np.zeros(n, dtype=np.float32)
-        for i in range(n):
-            neighs = tx_neighbors.get(i, set())
-            if neighs:
-                neigh_fraud_rates[i] = labels[list(neighs)].mean()
-        features['neigh_fraud_rate'] = neigh_fraud_rates
+            # Neighbor Fraud Rate（使用训练集标签）
+            neigh_fraud_rates = np.zeros(n, dtype=np.float32)
+            range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Neighbor fraud")
+            for i in range_iter:
+                neighs = tx_neighbors.get(i, set())
+                if neighs:
+                    train_neighs = [n for n in neighs if n in train_idx_set]
+                    if train_neighs:
+                        neigh_fraud_rates[i] = np.mean([train_label_map[n] for n in train_neighs])
+            features['neigh_fraud_rate'] = neigh_fraud_rates
+        else:
+            # 泄漏模式：在全部数据上计算（不推荐）
+            labels = df[label_col].values
+
+            for col in entity_cols:
+                if col not in df_columns:
+                    continue
+                fraud_map = df.groupby(col)[label_col].mean().to_dict()
+                features[f'{col}_fraud_rate'] = np.array([fraud_map.get(v, 0) for v in df[col].values], dtype=np.float32)
+
+            for i, col1 in enumerate(entity_cols[:4]):
+                for col2 in entity_cols[i+1:5]:
+                    if col1 not in df_columns or col2 not in df_columns:
+                        continue
+                    pair_df = df[[col1, col2, label_col]].copy()
+                    pair_df['_pair'] = pair_df[col1].astype(str) + '_' + pair_df[col2].astype(str)
+                    fraud_map = pair_df.groupby('_pair')[label_col].mean().to_dict()
+                    pair_values = df[col1].astype(str) + '_' + df[col2].astype(str)
+                    features[f'{col1}_{col2}_pair_fraud_rate'] = np.array([fraud_map.get(p, 0) for p in pair_values], dtype=np.float32)
+
+            neigh_fraud_rates = np.zeros(n, dtype=np.float32)
+            range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Neighbor fraud")
+            for i in range_iter:
+                neighs = tx_neighbors.get(i, set())
+                if neighs:
+                    neigh_fraud_rates[i] = labels[list(neighs)].mean()
+            features['neigh_fraud_rate'] = neigh_fraud_rates
 
     # ========== 9. 扩展特征：时序熵 ==========
     timestamp_col = None
@@ -365,7 +432,9 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
             if not ts.isna().all():
                 # hour entropy
                 hour_entropy_list = []
-                for card_id in df[card_col].unique():
+                unique_cards = df[card_col].unique()
+                cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Hour entropy")
+                for card_id in cards_iter:
                     mask = df[card_col] == card_id
                     hours = ts[mask].dt.hour
                     if len(hours) > 1:
@@ -378,7 +447,9 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
 
                 # day entropy
                 day_entropy_list = []
-                for card_id in df[card_col].unique():
+                unique_cards = df[card_col].unique()
+                cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Day entropy")
+                for card_id in cards_iter:
                     mask = df[card_col] == card_id
                     days = ts[mask].dt.dayofweek
                     if len(days) > 1:
@@ -438,11 +509,31 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         features['tx_velocity_24h'] = np.zeros(n, dtype=np.float32)
         features['amount_velocity_24h'] = np.zeros(n, dtype=np.float32)
 
-    # ========== 12. 扩展特征：风险评分 ==========
-    if has_label and label_col:
+    # ========== 12. 扩展特征：风险评分（无泄漏模式） ==========
+    if has_label and label_col and no_leakage and train_idx_set is not None:
         try:
-            # 需要传入train_idx来计算风险评分
-            pass  # 风险评分需要在主函数中计算
+            terminal_col = None
+            device_col = None
+            for col in ['terminal_id', 'merchant_id', 'merchant_type']:
+                if col in df_columns:
+                    terminal_col = col
+                    break
+            for col in ['device', 'device_type']:
+                if col in df_columns:
+                    device_col = col
+                    break
+
+            train_df = df.iloc[train_idx] if train_idx_set else None
+            if train_df is not None:
+                # Terminal risk score
+                if terminal_col and terminal_col in df.columns:
+                    terminal_fraud_rate = train_df.groupby(terminal_col)[label_col].mean()
+                    features['terminal_risk_score'] = df[terminal_col].map(terminal_fraud_rate).fillna(0).values.astype(np.float32)
+
+                # Device risk score
+                if device_col and device_col in df.columns:
+                    device_fraud_rate = train_df.groupby(device_col)[label_col].mean()
+                    features['device_risk_score'] = df[device_col].map(device_fraud_rate).fillna(0).values.astype(np.float32)
         except Exception:
             pass
     features['terminal_risk_score'] = np.zeros(n, dtype=np.float32)
@@ -463,7 +554,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
 
 def run_ascend_gar(data_path, card_col, entity_cols, account_features,
                    transaction_features, output_csv, npu_id=0, workers=1, mode='auto',
-                   label_col=None, fraud_value=1, train_idx=None):
+                   label_col=None, fraud_value=1, train_idx=None, no_leakage=True,
+                   train_ratio=0.7, seed=42, auto_detect=True):
     """Ascend NPU加速GAR特征生成"""
     device_info = check_ascend_npu(mode=mode)
 
@@ -472,20 +564,50 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
     print(f"NPU Available: {device_info['available']}", flush=True)
     print(f"Backend: {device_info['backend']}", flush=True)
     print(f"Workers: {workers}", flush=True)
+    if no_leakage:
+        print("Mode: NO-LEAKAGE (fraud rates from train only)", flush=True)
+    else:
+        print("Mode: LEAKAGE (fraud rates from all data - NOT RECOMMENDED)", flush=True)
     print("="*60, flush=True)
 
     start_time = time.time()
 
+    # 1. 加载数据
     print(f"[INFO] Loading data from {data_path}...", flush=True)
     df = pd.read_csv(data_path)
-    print(f"[INFO] Total records: {len(df)}", flush=True)
+    print(f"[INFO] Total records: {len(df)}, columns: {len(df.columns)}", flush=True)
 
+    # 自动检测列名
+    if auto_detect:
+        schema = auto_detect_schema(df)
+        print(f"[INFO] Auto-detected columns:", flush=True)
+        for col_type, actual_col in schema.items():
+            print(f"  {col_type:<20} -> {actual_col}", flush=True)
+
+        if card_col in schema:
+            card_col = schema['card_id']
+        if not entity_cols or entity_cols == DEFAULT_ENTITY_COLS:
+            entity_cols = [v for k, v in schema.items() if k in ['card_id', 'merchant_id', 'terminal_id', 'device', 'is_night']]
+        if not account_features or account_features == DEFAULT_ACCOUNT_FEATURES:
+            account_features = [v for k, v in schema.items() if k in ['card_level', 'card_location', 'card_type']]
+        if not transaction_features or transaction_features == DEFAULT_TRANSACTION_FEATURES:
+            transaction_features = [v for k, v in schema.items() if k in ['amount', 'balance', 'is_cross_border']]
+
+    # 2. 预处理
     for col in entity_cols:
         if col in df.columns:
             df[col] = df[col].fillna(-1)
             if df[col].dtype == 'object':
                 df[col] = pd.factorize(df[col].astype(str))[0]
 
+    for col in account_features + transaction_features:
+        if col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].fillna('missing')
+            else:
+                df[col] = df[col].fillna(0)
+
+    # 3. 检测标签
     has_label = False
     if label_col and label_col in df.columns:
         has_label = True
@@ -504,6 +626,23 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
             amount_col = col
             break
 
+    # 4. 数据分割（无泄漏模式）
+    train_idx_arr, test_idx_arr = split_data(df, train_ratio=train_ratio, seed=seed)
+    print(f"[INFO] Data split: Train={len(train_idx_arr)}, Test={len(test_idx_arr)}", flush=True)
+
+    # 5. 计算欺诈率映射（无泄漏模式）
+    entity_fraud_maps = None
+    pair_fraud_maps = None
+    train_idx_set = None
+    train_label_map = None
+    if no_leakage and has_label:
+        train_df = df.iloc[train_idx_arr]
+        entity_fraud_maps, pair_fraud_maps = compute_fraud_rates_from_train(train_df, entity_cols, label_col)
+        train_idx_set = set(train_idx_arr)
+        train_labels = train_df[label_col].values
+        train_label_map = dict(zip(train_idx_arr, train_labels))
+        print("[INFO] Computed fraud rates from train only (no leakage)", flush=True)
+
     global_stats = compute_global_stats(df, entity_cols, card_col, amount_col)
 
     print("[INFO] Building graph...", flush=True)
@@ -516,7 +655,9 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
     print("[INFO] Building GAR features...", flush=True)
     feat_start = time.time()
     features = build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, card_col,
-                                            account_features, transaction_features, has_label, label_col)
+                                            account_features, transaction_features, has_label, label_col,
+                                            entity_fraud_maps, pair_fraud_maps,
+                                            no_leakage, train_idx_set, train_label_map)
     feat_time = time.time() - feat_start
     print(f"[INFO] Features built in {feat_time:.2f}s", flush=True)
 
@@ -528,6 +669,9 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
             df_features = pd.concat([df[key_cols], df_features], axis=1)
         if has_label and label_col:
             df_features[label_col] = df[label_col].values
+        # 添加split列
+        split_arr = np.array(['train' if i in train_idx_arr else 'test' for i in range(len(df_features))])
+        df_features['split'] = split_arr
         df_features.to_csv(output_csv, index=False)
         print(f"[INFO] Saved to {output_csv}", flush=True)
         print(f"[INFO] Shape: {df_features.shape}", flush=True)
@@ -589,6 +733,14 @@ Examples:
                         help='自动检测列名并映射到标准列名（默认开启）')
     parser.add_argument('--no-auto-detect', action='store_false', dest='auto_detect',
                         help='关闭自动列名检测')
+    parser.add_argument('--no-leakage', action='store_true', default=True,
+                        help='防止数据泄漏：欺诈率仅从训练集计算（默认开启）')
+    parser.add_argument('--leakage', action='store_false', dest='no_leakage',
+                        help='关闭防泄漏模式：欺诈率从全部数据计算（不推荐）')
+    parser.add_argument('--train-ratio', type=float, default=0.7,
+                        help='训练集比例（默认: 0.7）')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='随机种子（默认: 42）')
 
     args = parser.parse_args()
 
@@ -609,7 +761,8 @@ Examples:
 
     run_ascend_gar(args.data, args.card_col, entity_cols, account_features,
                    transaction_features, args.output_csv, args.npu_id, args.workers, args.mode,
-                   args.label_col, args.fraud_value)
+                   args.label_col, args.fraud_value, None, args.no_leakage,
+                   args.train_ratio, args.seed, args.auto_detect)
 
 
 if __name__ == '__main__':

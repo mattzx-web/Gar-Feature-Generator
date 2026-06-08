@@ -35,6 +35,12 @@ import argparse
 from datetime import datetime
 import time
 
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -179,14 +185,15 @@ def load_and_preprocess_data(data_path, card_col, entity_cols, account_features,
     return df, card_col, entity_cols, account_features, transaction_features, has_label, label_col
 
 
-def build_graph(df, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THRESHOLD):
+def build_graph(df, entity_cols, neighbor_threshold=DEFAULT_NEIGHBOR_THRESHOLD, show_progress=True):
     """构建交易图结构"""
     print(f"[INFO] Building graph...", flush=True)
 
     n = len(df)
     tx_neighbors = defaultdict(set)
 
-    for col in entity_cols:
+    iterator = entity_cols if not show_progress or not TQDM_AVAILABLE else tqdm(entity_cols, desc="[Graph] Entity columns")
+    for col in iterator:
         if col not in df.columns:
             continue
         groups = df.groupby(col).indices
@@ -536,7 +543,8 @@ def build_gar_features_no_leakage(df, train_idx, tx_neighbors, card_col,
         if train_is_fraud is not None:
             train_label_map = dict(zip(train_idx, train_is_fraud))
             neigh_fraud_rates = []
-            for i in range(n):
+            range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Neighbor fraud rate")
+            for i in range_iter:
                 neighs = tx_neighbors.get(i, set())
                 if neighs:
                     train_neighs = [n for n in neighs if n in train_label_map]
@@ -642,7 +650,9 @@ def compute_temporal_features(df, card_col, timestamp_col):
     # 小时分布熵（按card_id分组计算）
     if card_col in df.columns:
         hour_entropy_list = []
-        for card_id in df[card_col].unique():
+        unique_cards = df[card_col].unique()
+        cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Hour entropy")
+        for card_id in cards_iter:
             mask = df[card_col] == card_id
             hours = ts[mask].dt.hour
             if len(hours) > 1:
@@ -656,7 +666,9 @@ def compute_temporal_features(df, card_col, timestamp_col):
 
         # 日期分布熵
         day_entropy_list = []
-        for card_id in df[card_col].unique():
+        unique_cards = df[card_col].unique()
+        cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Day entropy")
+        for card_id in cards_iter:
             mask = df[card_col] == card_id
             days = ts[mask].dt.dayofweek
             if len(days) > 1:
@@ -758,7 +770,8 @@ def compute_graph_metrics(df, tx_neighbors, card_col):
 
     # Clustering coefficient approximation (基于邻居重叠度)
     clustering = []
-    for i in range(n):
+    range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Graph metrics")
+    for i in range_iter:
         neighbors = tx_neighbors.get(i, set())
         if len(neighbors) > 1:
             # 计算邻居之间的连接数
@@ -784,7 +797,7 @@ def compute_graph_metrics(df, tx_neighbors, card_col):
     return features
 
 
-def export_features_to_csv(features_dict, feature_names, output_path, original_df=None, has_label=False, split_col=None):
+def export_features_to_csv(features_dict, feature_names, output_path, original_df=None, has_label=False, split_col=None, label_col=None):
     """导出特征到CSV"""
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
 
@@ -800,12 +813,16 @@ def export_features_to_csv(features_dict, feature_names, output_path, original_d
         if key_cols:
             df_features = pd.concat([original_df[key_cols], df_features], axis=1)
 
-    # 保留标签
-    if has_label:
-        for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
-            if col in original_df.columns:
-                df_features[col] = original_df[col].values
-                break
+    # 保留标签（使用实际的label_col）
+    if has_label and label_col and original_df is not None:
+        if label_col in original_df.columns:
+            df_features[label_col] = original_df[label_col].values
+        else:
+            # 回退：尝试常见列名
+            for col in ['isFraud', 'fraud', 'label', 'is_fraud', '是否欺诈']:
+                if col in original_df.columns:
+                    df_features[col] = original_df[col].values
+                    break
 
     # 添加split列
     if split_col is not None:
@@ -986,7 +1003,7 @@ Examples:
     # 5. 导出或训练
     if export_only:
         if args.output_csv:
-            export_features_to_csv(features_dict, feature_names, args.output_csv, df, has_label, split标记)
+            export_features_to_csv(features_dict, feature_names, args.output_csv, df, has_label, split标记, label_col)
         else:
             print("[ERROR] --output-csv is required when using --export-features-only", flush=True)
     else:
@@ -1002,7 +1019,7 @@ Examples:
             print("[INFO] White sample mode - use --export-features-only to save features", flush=True)
             os.makedirs(args.output_dir, exist_ok=True)
             output_csv = args.output_csv or f"{args.output_dir}/gar_features_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            export_features_to_csv(features_dict, feature_names, output_csv, df, has_label, split标记)
+            export_features_to_csv(features_dict, feature_names, output_csv, df, has_label, split标记, label_col)
 
     print(f"\nTotal time: {(time.time()-start_time)/60:.1f} minutes", flush=True)
 
