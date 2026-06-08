@@ -40,21 +40,99 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # 默认配置
 DEFAULT_CARD_COL = 'card_id'
-DEFAULT_ENTITY_COLS = ['card_id', 'merchant_id', 'device_type', 'transaction_type']
-DEFAULT_ACCOUNT_FEATURES = ['card_level', 'issuing_bank']
-DEFAULT_TRANSACTION_FEATURES = ['timestamp', 'amount', 'balance_after', 'is_frequent_contact',
-                                'transaction_channel', 'device_type', 'is_pos', 'is_cross_border']
+DEFAULT_ENTITY_COLS = ['card_id', 'merchant_id', 'device', 'is_night']
+DEFAULT_ACCOUNT_FEATURES = ['card_level', 'card_location', 'card_type']
+DEFAULT_TRANSACTION_FEATURES = ['amount', 'balance', 'is_cross_border']
 DEFAULT_NEIGHBOR_THRESHOLD = 300
 
+# 标准列名到可能列名的映射（用于自动检测）
+COLUMN_ALIASES = {
+    'card_id': ['card_id', 'card', 'card_no', '卡号', '银行卡号', 'customer_id', 'customer'],
+    'timestamp': ['timestamp', 'time', 'datetime', 'trans_time', 'transaction_time', '时间戳', '交易时间', 'tx_datetime', 'trans_datetime'],
+    'amount': ['amount', 'amt', 'transaction_amount', '交易金额', 'tx_amount', 'total'],
+    'balance': ['balance', 'balance_after', '账户余额', '余额'],
+    'merchant_id': ['merchant_id', 'merchant', 'mcc', '商户号', 'merchant_code', 'merchant'],
+    'device': ['device', 'device_type', 'device_id', '设备', '交易设备'],
+    'is_night': ['is_night', 'night_tx', '夜间交易'],
+    'is_cross_border': ['is_cross_border', 'cross_border', '跨境', '境外交易'],
+    'is_fraud': ['isFraud', 'fraud', 'label', 'is_fraud', 'fraud_label', '欺诈'],
+    'card_level': ['card_level', 'level', '卡等级', '等级'],
+    'card_location': ['card_location', 'location', 'card_region', '卡注册地', '地区'],
+    'card_type': ['card_type', 'card_category', '卡类型', '类型'],
+    'terminal_id': ['terminal_id', 'terminal', 'pos_id', '终端号', '终端ID'],
+    'merchant_type': ['merchant_type', 'merchant_category', 'mcc_code', '商户类型'],
+}
 
-def load_and_preprocess_data(data_path, card_col, entity_cols, account_features, transaction_features, explicit_label_col=None):
+
+def auto_detect_schema(df):
+    """
+    自动检测数据集的列类型
+
+    Returns:
+        dict: 标准列名到实际列名的映射
+    """
+    detected = {}
+    used_columns = set()
+
+    # 按优先级检测
+    priority_order = ['card_id', 'amount', 'timestamp', 'is_fraud', 'merchant_id',
+                      'terminal_id', 'device', 'balance', 'is_night', 'is_cross_border',
+                      'card_level', 'card_location', 'card_type', 'merchant_type']
+
+    for col_type in priority_order:
+        aliases = COLUMN_ALIASES.get(col_type, [])
+        for alias in aliases:
+            for col in df.columns:
+                if col.lower() == alias.lower() or alias.lower() in col.lower():
+                    if col not in used_columns:
+                        detected[col_type] = col
+                        used_columns.add(col)
+                        break
+
+    return detected
+
+
+def load_and_preprocess_data(data_path, card_col, entity_cols, account_features,
+                              transaction_features, explicit_label_col=None, auto_detect=True):
     """
     加载并预处理数据
+
+    Args:
+        data_path: CSV文件路径
+        card_col: 卡号列名
+        entity_cols: 实体列名列表
+        account_features: 账户级特征列表
+        transaction_features: 交易级特征列表
+        explicit_label_col: 显式指定的标签列名
+        auto_detect: 是否自动检测列名
     """
     print(f"[INFO] Loading data from {data_path}...", flush=True)
 
     df = pd.read_csv(data_path)
-    print(f"[INFO] Loaded {len(df)} records", flush=True)
+    print(f"[INFO] Loaded {len(df)} records, {len(df.columns)} columns", flush=True)
+
+    # 自动检测列名
+    if auto_detect:
+        schema = auto_detect_schema(df)
+        print(f"[INFO] Auto-detected columns:", flush=True)
+        for col_type, actual_col in schema.items():
+            print(f"  {col_type:<20} -> {actual_col}", flush=True)
+
+        # 更新entity_cols, account_features, transaction_features
+        if card_col in schema:
+            card_col = schema['card_id']
+        if not entity_cols or entity_cols == DEFAULT_ENTITY_COLS:
+            entity_cols = [v for k, v in schema.items() if k in ['card_id', 'merchant_id', 'terminal_id', 'device', 'is_night']]
+            if entity_cols:
+                print(f"[INFO] Updated entity_cols: {entity_cols}", flush=True)
+        if not account_features or account_features == DEFAULT_ACCOUNT_FEATURES:
+            account_features = [v for k, v in schema.items() if k in ['card_level', 'card_location', 'card_type']]
+            if account_features:
+                print(f"[INFO] Updated account_features: {account_features}", flush=True)
+        if not transaction_features or transaction_features == DEFAULT_TRANSACTION_FEATURES:
+            transaction_features = [v for k, v in schema.items() if k in ['amount', 'balance', 'is_cross_border']]
+            if transaction_features:
+                print(f"[INFO] Updated transaction_features: {transaction_features}", flush=True)
 
     # 检测是否有标签
     has_label = False
@@ -834,6 +912,10 @@ Examples:
                         help='欺诈标签列名（如 isFraud, fraud, label）')
     parser.add_argument('--fraud-value', type=int, default=1,
                         help='表示欺诈的值（默认: 1）')
+    parser.add_argument('--auto-detect', action='store_true', default=True,
+                        help='自动检测列名并映射到标准列名（默认开启）')
+    parser.add_argument('--no-auto-detect', action='store_false', dest='auto_detect',
+                        help='关闭自动列名检测')
 
     args = parser.parse_args()
 
@@ -854,7 +936,7 @@ Examples:
 
     # 1. 加载数据
     df, card_col, entity_cols, account_features, transaction_features, has_label, label_col = load_and_preprocess_data(
-        args.data, args.card_col, entity_cols, account_features, transaction_features, args.label_col
+        args.data, args.card_col, entity_cols, account_features, transaction_features, args.label_col, args.auto_detect
     )
 
     # 2. 分割数据

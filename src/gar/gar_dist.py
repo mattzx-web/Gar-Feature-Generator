@@ -26,10 +26,50 @@ import time
 sys.stdout.reconfigure(line_buffering=True)
 
 DEFAULT_CARD_COL = 'card_id'
-DEFAULT_ENTITY_COLS = ['card_id', 'merchant_id', 'device_type', 'transaction_type']
-DEFAULT_ACCOUNT_FEATURES = ['card_level', 'issuing_bank']
-DEFAULT_TRANSACTION_FEATURES = ['amount', 'balance_after', 'timestamp', 'is_pos', 'is_cross_border']
+DEFAULT_ENTITY_COLS = ['card_id', 'merchant_id', 'device', 'is_night']
+DEFAULT_ACCOUNT_FEATURES = ['card_level', 'card_location', 'card_type']
+DEFAULT_TRANSACTION_FEATURES = ['amount', 'balance', 'is_cross_border']
 DEFAULT_NEIGHBOR_THRESHOLD = 300
+
+# 标准列名到可能列名的映射（用于自动检测）
+COLUMN_ALIASES = {
+    'card_id': ['card_id', 'card', 'card_no', '卡号', '银行卡号', 'customer_id', 'customer'],
+    'timestamp': ['timestamp', 'time', 'datetime', 'trans_time', 'transaction_time', '时间戳', '交易时间', 'tx_datetime', 'trans_datetime'],
+    'amount': ['amount', 'amt', 'transaction_amount', '交易金额', 'tx_amount', 'total'],
+    'balance': ['balance', 'balance_after', '账户余额', '余额'],
+    'merchant_id': ['merchant_id', 'merchant', 'mcc', '商户号', 'merchant_code', 'merchant'],
+    'device': ['device', 'device_type', 'device_id', '设备', '交易设备'],
+    'is_night': ['is_night', 'night_tx', '夜间交易'],
+    'is_cross_border': ['is_cross_border', 'cross_border', '跨境', '境外交易'],
+    'is_fraud': ['isFraud', 'fraud', 'label', 'is_fraud', 'fraud_label', '欺诈'],
+    'card_level': ['card_level', 'level', '卡等级', '等级'],
+    'card_location': ['card_location', 'location', 'card_region', '卡注册地', '地区'],
+    'card_type': ['card_type', 'card_category', '卡类型', '类型'],
+    'terminal_id': ['terminal_id', 'terminal', 'pos_id', '终端号', '终端ID'],
+    'merchant_type': ['merchant_type', 'merchant_category', 'mcc_code', '商户类型'],
+}
+
+
+def auto_detect_schema(df):
+    """自动检测数据集的列类型"""
+    detected = {}
+    used_columns = set()
+
+    priority_order = ['card_id', 'amount', 'timestamp', 'is_fraud', 'merchant_id',
+                      'terminal_id', 'device', 'balance', 'is_night', 'is_cross_border',
+                      'card_level', 'card_location', 'card_type', 'merchant_type']
+
+    for col_type in priority_order:
+        aliases = COLUMN_ALIASES.get(col_type, [])
+        for alias in aliases:
+            for col in df.columns:
+                if col.lower() == alias.lower() or alias.lower() in col.lower():
+                    if col not in used_columns:
+                        detected[col_type] = col
+                        used_columns.add(col)
+                        break
+
+    return detected
 
 
 def compute_global_stats(df, entity_cols, card_col, amount_col=None):
@@ -581,6 +621,10 @@ Examples:
                         help='欺诈标签列名（如 isFraud, fraud, label）')
     parser.add_argument('--fraud-value', type=int, default=1,
                         help='表示欺诈的值（默认: 1）')
+    parser.add_argument('--auto-detect', action='store_true', default=True,
+                        help='自动检测列名并映射到标准列名（默认开启）')
+    parser.add_argument('--no-auto-detect', action='store_false', dest='auto_detect',
+                        help='关闭自动列名检测')
 
     args = parser.parse_args()
 
