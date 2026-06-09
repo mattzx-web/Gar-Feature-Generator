@@ -34,6 +34,7 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 # 自动加载Ascend环境
 def load_ascend_env():
@@ -175,11 +176,12 @@ def compute_global_stats(df, entity_cols, card_col, amount_col=None):
     return global_stats
 
 
-def build_graph(df, entity_cols, neighbor_threshold=300):
+def build_graph(df, entity_cols, neighbor_threshold=300, show_progress=True):
     """构建稀疏图结构"""
     tx_neighbors = defaultdict(set)
 
-    for col in entity_cols:
+    iterator = entity_cols if not TQDM_AVAILABLE or not show_progress else tqdm(entity_cols, desc="[Graph] Building entity index")
+    for col in iterator:
         if col not in df.columns:
             continue
         groups = df.groupby(col).indices
@@ -228,8 +230,11 @@ def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
 def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, card_col,
                                   account_features, transaction_features, has_label, label_col,
                                   entity_fraud_maps=None, pair_fraud_maps=None,
-                                  no_leakage=False, train_idx_set=None, train_label_map=None):
+                                  no_leakage=False, train_idx_set=None, train_label_map=None,
+                                  show_progress=True):
     """构建GAR特征（优化版本：向量化+稀疏图）"""
+    if show_progress and len(df) > 100000:
+        print(f"[INFO]   Processing {len(df)} records, feature engineering started...", flush=True)
 
     features = {}
     n = len(df)
@@ -280,7 +285,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         amt_std_arr = np.zeros(n, dtype=np.float32)
         amt_max_arr = np.zeros(n, dtype=np.float32)
 
-        for card in unique_cards:
+        for card in tqdm(unique_cards, desc="[Features] Card aggregation", leave=False):
             if card in card_agg:
                 mask = card_values == card
                 agg = card_agg[card]
@@ -320,7 +325,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         col_values = df[col].values
         entity_ids = np.unique(col_values)
         entity_degrees = {}
-        for eid in entity_ids:
+        for eid in tqdm(entity_ids, desc=f"[Features] {col} degree", leave=False):
             mask = col_values == eid
             entity_degrees[eid] = degrees[mask].mean() if mask.sum() > 0 else 0
         features[f'{col}_degree'] = np.array([entity_degrees.get(v, 0) for v in col_values], dtype=np.float32)
@@ -331,7 +336,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         amt_1hop_mean = np.zeros(n, dtype=np.float32)
         amt_1hop_std = np.zeros(n, dtype=np.float32)
 
-        for i in range(n):
+        range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Neighbor amounts", leave=False)
+        for i in range_iter:
             neighs = tx_neighbors.get(i, set())
             if neighs:
                 neigh_amts = amounts[list(neighs)]
@@ -366,6 +372,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
             break
 
        # ========== 8. GAR Fraud Rate特征（无泄漏模式） ==========
+    if len(df) > 100000:
+        print(f"[INFO]   Section 2/4: Fraud rate features (no leakage)", flush=True)
     if has_label and label_col:
         if no_leakage and entity_fraud_maps:
             # 无泄漏模式：使用预计算的欺诈率映射
@@ -421,6 +429,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
             features['neigh_fraud_rate'] = neigh_fraud_rates
 
     # ========== 9. 扩展特征：时序熵 ==========
+    if len(df) > 100000:
+        print(f"[INFO]   Section 3/4: Temporal & entropy features", flush=True)
     timestamp_col = None
     for col in ['timestamp', '时间戳', 'trans_time', 'transaction_time']:
         if col in df_columns:
@@ -472,6 +482,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         features['time_diff_prev'] = np.zeros(n, dtype=np.float32)
 
     # ========== 10. 扩展特征：金额统计 ==========
+    if len(df) > 100000:
+        print(f"[INFO]   Section 4/4: Extended features (amount, velocity, graph)", flush=True)
     if amount_col and card_col in df_columns:
         try:
             card_amt_mean = df.groupby(card_col)[amount_col].transform('mean')
@@ -547,7 +559,8 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
 
     # 释放局部引用，避免返回时触发大量gc
     del degrees, max_degree
-    return features
+    feature_names = list(features.keys())
+    return features, feature_names
 
 
 def run_ascend_gar(data_path, card_col, entity_cols, account_features,
@@ -645,22 +658,29 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
 
     print("[INFO] Building graph...", flush=True)
     graph_start = time.time()
-    tx_neighbors = build_graph(df, entity_cols)
+    tx_neighbors = build_graph(df, entity_cols, show_progress=True)
     graph_time = time.time() - graph_start
     n_edges = sum(len(v) for v in tx_neighbors.values()) // 2
     print(f"[INFO] Graph built in {graph_time:.2f}s, edges: {n_edges}", flush=True)
+    if len(df) > 100000:
+        print(f"[INFO] Graph throughput: {len(df)/graph_time:.0f} records/sec", flush=True)
 
     print("[INFO] Building GAR features...", flush=True)
     feat_start = time.time()
-    features = build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, card_col,
+    print(f"[INFO]   Section 1/4: Basic features (tx level, entity freq, card agg)", flush=True)
+    features, feature_names = build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, card_col,
                                             account_features, transaction_features, has_label, label_col,
                                             entity_fraud_maps, pair_fraud_maps,
-                                            no_leakage, train_idx_set, train_label_map)
+                                            no_leakage, train_idx_set, train_label_map,
+                                            show_progress=True)
     feat_time = time.time() - feat_start
-    print(f"[INFO] Features built in {feat_time:.2f}s", flush=True)
+    print(f"[INFO]   Features built in {feat_time:.2f}s", flush=True)
+    print(f"[INFO]   Feature count: {len(feature_names)}", flush=True)
 
     if output_csv:
         os.makedirs(os.path.dirname(output_csv) if os.path.dirname(output_csv) else '.', exist_ok=True)
+        print(f"[INFO] Exporting features to CSV...", flush=True)
+        export_start = time.time()
         df_features = pd.DataFrame(features)
         key_cols = [c for c in [card_col, 'timestamp', '时间戳'] if c in df.columns]
         if key_cols:
@@ -670,19 +690,36 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
         # 添加split列
         split_arr = np.array(['train' if i in train_idx_arr else 'test' for i in range(len(df_features))])
         df_features['split'] = split_arr
-        df_features.to_csv(output_csv, index=False)
+        # 分块写入，避免大数据量时内存问题
+        chunk_size = 500000
+        n_total = len(df_features)
+        if n_total > chunk_size:
+            n_chunks = (n_total + chunk_size - 1) // chunk_size
+            print(f"[INFO]   Writing {n_total} rows in {n_chunks} chunks...", flush=True)
+            for i in range(n_chunks):
+                start_idx = i * chunk_size
+                end_idx = min((i + 1) * chunk_size, n_total)
+                chunk_df = df_features.iloc[start_idx:end_idx]
+                if i == 0:
+                    chunk_df.to_csv(output_csv, index=False, mode='w')
+                else:
+                    chunk_df.to_csv(output_csv, index=False, mode='a', header=False)
+                print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written", flush=True)
+        else:
+            df_features.to_csv(output_csv, index=False)
+        export_time = time.time() - export_start
         print(f"[INFO] Saved to {output_csv}", flush=True)
-        print(f"[INFO] Shape: {df_features.shape}", flush=True)
+        print(f"[INFO] Shape: {df_features.shape}, export time: {export_time:.1f}s", flush=True)
 
     elapsed = time.time() - start_time
     print(f"\n[INFO] Total time: {elapsed/60:.1f} minutes", flush=True)
     print(f"[INFO] Throughput: {len(df)/elapsed:.0f} records/sec", flush=True)
 
-    # 延迟gc：等所有打印完成后再释放大对象，避免hang在print缓冲区
+    # 释放临时大对象（仅清除引用，由Python自动gc，不主动触发stop-the-world）
     del df, tx_neighbors, global_stats
-    gc.collect()
 
-    return features
+    print("[INFO] Feature generation complete, returning to caller...", flush=True)
+    return features, feature_names
 
 
 def main():

@@ -1,0 +1,23 @@
+# Experiment outputs
+outputs/
+/Gar-Feature-Generator-experimentOutputs/
+
+# Data files (generated)
+data/
+test_data/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store

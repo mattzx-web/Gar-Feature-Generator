@@ -676,7 +676,7 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
         merged_csv = os.path.join(output_dir, '_merged_temp.csv')
         combined_df.to_csv(merged_csv, index=False)
 
-        features = ascend_run_gar(
+        features, feature_names = ascend_run_gar(
             data_path=merged_csv,
             card_col=card_col,
             entity_cols=entity_cols,
@@ -694,24 +694,53 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
             seed=seed,
             auto_detect=False
         )
-        feature_names = list(features.keys())
 
         os.remove(merged_csv)
+        print("[INFO] Merged CSV removed, building final feature DataFrame...", flush=True)
 
-        # Reconstruct split and label
-        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(len(combined_df))])
+        # Capture stats before deleting combined_df
+        n_total = len(combined_df)
+        fraud_count_val = int(combined_df[label_col].sum())
+        white_count_val = int(n_total - fraud_count_val)
+        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)])
 
-        # Export
+        # Export with chunking
         features_csv = os.path.join(output_dir, 'gar_features.csv')
+        print(f"[INFO] Building feature DataFrame ({len(feature_names)} features, {n_total} rows)...", flush=True)
         df_features = pd.DataFrame(features)
+        print(f"[INFO] Feature DataFrame built, memory usage estimated...", flush=True)
+
         key_cols = [c for c in [card_col, 'timestamp', '时间戳'] if c in combined_df.columns]
         if key_cols:
+            print(f"[INFO] Adding key columns: {key_cols}", flush=True)
             df_features = pd.concat([combined_df[key_cols].reset_index(drop=True), df_features], axis=1)
         df_features[label_col] = combined_df[label_col].values
         df_features['split'] = split_arr
-        df_features.to_csv(features_csv, index=False)
+
+        print(f"[INFO] Exporting to CSV ({n_total} rows)...", flush=True)
+        export_start = time.time()
+        chunk_size = 500000
+        if n_total > chunk_size:
+            n_chunks = (n_total + chunk_size - 1) // chunk_size
+            for i in range(n_chunks):
+                start_idx = i * chunk_size
+                end_idx = min((i + 1) * chunk_size, n_total)
+                chunk_df = df_features.iloc[start_idx:end_idx]
+                if i == 0:
+                    chunk_df.to_csv(features_csv, index=False, mode='w')
+                else:
+                    chunk_df.to_csv(features_csv, index=False, mode='a', header=False)
+                print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written", flush=True)
+        else:
+            df_features.to_csv(features_csv, index=False)
+        export_time = time.time() - export_start
         print(f"[INFO] Saved to {features_csv}", flush=True)
-        print(f"[INFO] Shape: {df_features.shape}", flush=True)
+        print(f"[INFO] Shape: {df_features.shape}, export time: {export_time:.1f}s", flush=True)
+
+        # Free memory
+        del combined_df, df_features, features
+        gc.collect()
+        print("[INFO] Memory cleaned up.", flush=True)
 
     else:
         # CPU mode: use original implementation
@@ -753,12 +782,12 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
     meta = {
         'fraud_data_path': fraud_data_path,
         'white_data_path': white_data_path,
-        'total_count': len(combined_df),
-        'fraud_count': int(combined_df[label_col].sum()),
-        'white_count': int(len(combined_df) - combined_df[label_col].sum()),
+        'total_count': n_total,
+        'fraud_count': fraud_count_val,
+        'white_count': white_count_val,
         'train_count': len(train_idx),
         'test_count': len(test_idx),
-        'imbalance_ratio': float((len(combined_df) - combined_df[label_col].sum()) / max(1, combined_df[label_col].sum())),
+        'imbalance_ratio': float(white_count_val / max(1, fraud_count_val)),
         'feature_count': len(feature_names),
         'feature_names': feature_names,
         'label_col': label_col,
