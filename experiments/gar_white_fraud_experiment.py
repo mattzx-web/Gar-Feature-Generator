@@ -60,6 +60,15 @@ try:
 except ImportError:
     GAR_ASCEND_AVAILABLE = False
 
+# ========== Gar NPU imports (NPU-accelerated) ==========
+try:
+    from src.gar.gar_npu import (
+        run_npu_gar as npu_run_gar,
+    )
+    GAR_NPU_AVAILABLE = True
+except ImportError:
+    GAR_NPU_AVAILABLE = False
+
 # ========== PyTorch / NPU imports ==========
 TORCH_AVAILABLE = False
 NPU_AVAILABLE = False
@@ -629,7 +638,7 @@ def build_gar_features(df, train_idx, tx_neighbors, card_col, entity_cols,
 def generate_features_step(fraud_data_path, white_data_path, output_dir,
                          card_col='card_id', entity_cols=None, account_features=None,
                          transaction_features=None, train_ratio=0.7, seed=42,
-                         mode='cpu', workers=4):
+                         mode='cpu', workers=4, npu_feature=False):
     """Step 1: 特征生成"""
     print("="*60, flush=True)
     print("GAR Feature Generation (Step 1/2)", flush=True)
@@ -667,16 +676,55 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
     print(f"[INFO] Train: {len(train_idx)}, Test: {len(test_idx)}", flush=True)
 
     if mode == 'npu':
-        # Use Ascend-optimized feature generation from gar_ascend
-        if not GAR_ASCEND_AVAILABLE:
-            raise ImportError("gar_ascend not available, cannot use mode='npu'")
-        print("[INFO] Using Ascend-optimized feature generation (mode=npu)", flush=True)
+        # Use NPU-accelerated feature generation (gar_npu.py)
+        if npu_feature and GAR_NPU_AVAILABLE:
+            print("[INFO] Using NPU-accelerated feature generation (mode=npu, --npu-feature)", flush=True)
+            merged_csv = os.path.join(output_dir, '_merged_temp.csv')
+            combined_df.to_csv(merged_csv, index=False)
 
-        # Save merged data temporarily
-        merged_csv = os.path.join(output_dir, '_merged_temp.csv')
-        combined_df.to_csv(merged_csv, index=False)
+            features, feature_names = npu_run_gar(
+                data_path=merged_csv,
+                card_col=card_col,
+                entity_cols=entity_cols,
+                account_features=account_features,
+                transaction_features=transaction_features,
+                output_csv=None,
+                npu_id=0,
+                workers=workers,
+                mode='auto',
+                label_col=label_col,
+                fraud_value=1,
+                train_idx=train_idx,
+                no_leakage=True,
+                train_ratio=train_ratio,
+                seed=seed,
+                auto_detect=False
+            )
+        elif GAR_ASCEND_AVAILABLE:
+            print("[INFO] Using Ascend-optimized feature generation (mode=npu)", flush=True)
+            merged_csv = os.path.join(output_dir, '_merged_temp.csv')
+            combined_df.to_csv(merged_csv, index=False)
 
-        features, feature_names = ascend_run_gar(
+            features, feature_names = ascend_run_gar(
+                data_path=merged_csv,
+                card_col=card_col,
+                entity_cols=entity_cols,
+                account_features=account_features,
+                transaction_features=transaction_features,
+                output_csv=None,
+                npu_id=0,
+                workers=workers,
+                mode='auto',
+                label_col=label_col,
+                fraud_value=1,
+                train_idx=train_idx,
+                no_leakage=True,
+                train_ratio=train_ratio,
+                seed=seed,
+                auto_detect=False
+            )
+        else:
+            raise ImportError("Neither gar_npu nor gar_ascend available for NPU mode")
             data_path=merged_csv,
             card_col=card_col,
             entity_cols=entity_cols,
@@ -1043,6 +1091,8 @@ Examples:
                         help='欺诈样本权重（用于处理不均衡，默认1.0）')
     parser.add_argument('--mode', type=str, choices=['cpu', 'npu', 'dist'],
                         default='cpu', help='运行模式')
+    parser.add_argument('--npu-feature', action='store_true',
+                        help='使用NPU加速特征生成（需配合--mode npu）')
     parser.add_argument('--workers', type=int, default=4,
                         help='分布式worker数量')
 
@@ -1056,7 +1106,7 @@ Examples:
         generate_features_step(
             args.fraud_data, args.white_data, args.output_dir,
             args.card_col, entity_cols, account_features, transaction_features,
-            args.train_ratio, args.seed, args.mode, args.workers
+            args.train_ratio, args.seed, args.mode, args.workers, args.npu_feature
         )
 
     if args.step in ['train', 'all']:
