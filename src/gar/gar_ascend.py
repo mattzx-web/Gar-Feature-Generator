@@ -25,6 +25,7 @@ import sys
 import argparse
 import time
 import subprocess
+import gc
 
 try:
     from tqdm import tqdm
@@ -137,7 +138,7 @@ def check_ascend_npu(mode='auto'):
         device_info['available'] = True
         device_info['backend'] = 'ascend'
         ret = acl.rt.get_device_count()
-        device_info['device_count'] = ret if ret > 0 else 0
+        device_info['device_count'] = ret[0] if ret[0] > 0 else 0
     except (ImportError, AttributeError):
         pass
 
@@ -430,42 +431,37 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         try:
             ts = pd.to_datetime(df[timestamp_col], errors='coerce')
             if not ts.isna().all():
-                # hour entropy
-                hour_entropy_list = []
-                unique_cards = df[card_col].unique()
-                cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Hour entropy")
-                for card_id in cards_iter:
-                    mask = df[card_col] == card_id
-                    hours = ts[mask].dt.hour
-                    if len(hours) > 1:
-                        hour_counts = hours.value_counts(normalize=True)
-                        entropy = -np.sum(hour_counts * np.log(hour_counts + 1e-10))
-                    else:
-                        entropy = 0
-                    hour_entropy_list.extend([entropy] * mask.sum())
-                features['hour_entropy'] = np.array(hour_entropy_list) if len(hour_entropy_list) == n else np.zeros(n, dtype=np.float32)
+                # hour entropy - vectorized per (card, hour) group
+                df['_hour'] = ts.dt.hour.values
+                hour_cnt = df.groupby([card_col, '_hour']).size().reset_index(name='h_count')
+                hour_pct = hour_cnt.groupby(card_col)['h_count'].transform(lambda x: x / x.sum())
+                hour_cnt['h_pct'] = hour_pct
+                hour_cnt['h_entropy'] = -hour_cnt['h_pct'] * np.log(hour_cnt['h_pct'] + 1e-10)
+                card_hour_entropy = hour_cnt.groupby(card_col)['h_entropy'].sum().to_dict()
+                features['hour_entropy'] = df[card_col].map(card_hour_entropy).fillna(0).values.astype(np.float32)
+                del df['_hour']
 
-                # day entropy
-                day_entropy_list = []
-                unique_cards = df[card_col].unique()
-                cards_iter = unique_cards if not TQDM_AVAILABLE else tqdm(unique_cards, desc="[Features] Day entropy")
-                for card_id in cards_iter:
-                    mask = df[card_col] == card_id
-                    days = ts[mask].dt.dayofweek
-                    if len(days) > 1:
-                        day_counts = days.value_counts(normalize=True)
-                        entropy = -np.sum(day_counts * np.log(day_counts + 1e-10))
-                    else:
-                        entropy = 0
-                    day_entropy_list.extend([entropy] * mask.sum())
-                features['day_entropy'] = np.array(day_entropy_list) if len(day_entropy_list) == n else np.zeros(n, dtype=np.float32)
+                # day entropy - vectorized per (card, day) group
+                df['_day'] = ts.dt.dayofweek.values
+                day_cnt = df.groupby([card_col, '_day']).size().reset_index(name='d_count')
+                day_pct = day_cnt.groupby(card_col)['d_count'].transform(lambda x: x / x.sum())
+                day_cnt['d_pct'] = day_pct
+                day_cnt['d_entropy'] = -day_cnt['d_pct'] * np.log(day_cnt['d_pct'] + 1e-10)
+                card_day_entropy = day_cnt.groupby(card_col)['d_entropy'].sum().to_dict()
+                features['day_entropy'] = df[card_col].map(card_day_entropy).fillna(0).values.astype(np.float32)
+                del df['_day']
 
-                # time_diff_prev
-                df_sorted = df.copy()
-                df_sorted['_ts'] = ts
-                df_sorted = df_sorted.sort_values([card_col, timestamp_col])
-                time_diff = df_sorted.groupby(card_col)['_ts'].diff().dt.total_seconds().fillna(0)
-                features['time_diff_prev'] = df.index.map(time_diff.to_dict()).fillna(0).values.astype(np.float32)
+                # time_diff_prev - in-place sort without full DataFrame copy
+                order = np.lexsort((ts.values, df[card_col].values))
+                idx_sorted = df.index[order]
+                ts_sorted = ts.values[order]
+                card_sorted = df[card_col].values[order]
+                # diff within card boundaries
+                is_new_card = np.diff(card_sorted, prepend=card_sorted[0:1]) != 0
+                ts_diff = np.diff(ts_sorted, prepend=np.nan)
+                ts_diff[is_new_card] = np.nan
+                time_diff_series = pd.Series(ts_diff, index=idx_sorted).dt.total_seconds().fillna(0)
+                features['time_diff_prev'] = df.index.map(time_diff_series.to_dict()).fillna(0).values.astype(np.float32)
         except Exception:
             features['hour_entropy'] = np.zeros(n, dtype=np.float32)
             features['day_entropy'] = np.zeros(n, dtype=np.float32)
@@ -545,10 +541,12 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
     features['degree_centrality'] = degrees / max_degree
     features['clustering_coeff'] = np.zeros(n, dtype=np.float32)
 
-    # 清理
+    # 清理 - nan_to_num
     for key in features:
         features[key] = np.nan_to_num(features[key], nan=0, posinf=0, neginf=0)
 
+    # 释放局部引用，避免返回时触发大量gc
+    del degrees, max_degree
     return features
 
 
@@ -679,6 +677,10 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
     elapsed = time.time() - start_time
     print(f"\n[INFO] Total time: {elapsed/60:.1f} minutes", flush=True)
     print(f"[INFO] Throughput: {len(df)/elapsed:.0f} records/sec", flush=True)
+
+    # 延迟gc：等所有打印完成后再释放大对象，避免hang在print缓冲区
+    del df, tx_neighbors, global_stats
+    gc.collect()
 
     return features
 

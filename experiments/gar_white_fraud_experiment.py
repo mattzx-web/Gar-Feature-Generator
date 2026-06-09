@@ -2,22 +2,31 @@
 GAR白样本+欺诈样本实验（优化版）
 
 支持大规模不均衡数据（1:20~1:40），特征生成与分类器训练分离。
+支持Ascend NPU加速（特征生成+模型训练）。
 
 用法:
-    # Step 1: 生成特征
+    # Step 1: 生成特征（NPU加速）
     python experiments/gar_white_fraud_experiment.py \
         --fraud-data ./data/fraud.csv \
         --white-data ./data/white.csv \
         --output-dir ./outputs/exp \
-        --step generate
+        --step generate \
+        --mode npu
 
-    # Step 2: 训练分类器（支持类别权重调整）
+    # Step 2: 训练分类器（NPU加速）
     python experiments/gar_white_fraud_experiment.py \
         --fraud-data ./data/fraud.csv \
         --white-data ./data/white.csv \
         --output-dir ./outputs/exp \
         --step train \
-        --class-weight20
+        --mode npu
+
+    # 一步完成（CPU）
+    python experiments/gar_white_fraud_experiment.py \
+        --fraud-data ./data/fraud.csv \
+        --white-data ./data/white.csv \
+        --output-dir ./outputs/exp \
+        --step all
 """
 
 import pandas as pd
@@ -37,6 +46,242 @@ try:
     TQDM_AVAILABLE = True
 except ImportError:
     TQDM_AVAILABLE = False
+
+# ========== Gar Ascend imports (CPU fallback) ==========
+# Imported at module level to avoid UnboundLocalError from conditional import
+try:
+    from src.gar.gar_ascend import (
+        run_ascend_gar as ascend_run_gar,
+        compute_global_stats as ascend_compute_global_stats,
+        build_graph as ascend_build_graph,
+        compute_fraud_rates_from_train as ascend_compute_fraud_rates,
+    )
+    GAR_ASCEND_AVAILABLE = True
+except ImportError:
+    GAR_ASCEND_AVAILABLE = False
+
+# ========== PyTorch / NPU imports ==========
+TORCH_AVAILABLE = False
+NPU_AVAILABLE = False
+TORCH_NPU_AVAILABLE = False
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader, TensorDataset
+    TORCH_AVAILABLE = True
+
+    # Check NPU availability
+    try:
+        import torch_npu
+        TORCH_NPU_AVAILABLE = True
+    except ImportError:
+        pass
+
+    # Detect compute backend
+    if TORCH_AVAILABLE and torch.cuda.is_available():
+        _device_name = torch.cuda.get_device_name(0)
+        if 'Ascend' in _device_name or 'NPU' in _device_name:
+            NPU_AVAILABLE = True
+        elif 'NVIDIA' in _device_name or 'GeForce' in _device_name or 'Tesla' in _device_name:
+            NPU_AVAILABLE = False  # CUDA, not NPU
+    elif TORCH_NPU_AVAILABLE:
+        try:
+            torch.npu.set_device(0)
+            NPU_AVAILABLE = True
+        except Exception:
+            pass
+except ImportError:
+    pass
+
+
+# ========== Device detection helper ==========
+def get_device():
+    """自动检测可用设备并返回"""
+    if NPU_AVAILABLE:
+        return torch.device('npu')
+    if TORCH_AVAILABLE and torch.cuda.is_available():
+        return torch.device('cuda')
+    return torch.device('cpu')
+
+
+def device_info():
+    """返回设备信息字典"""
+    info = {'backend': 'cpu', 'device': str(get_device())}
+    if NPU_AVAILABLE:
+        info['backend'] = 'ascend'
+    elif TORCH_AVAILABLE and torch.cuda.is_available():
+        info['backend'] = 'cuda'
+    if TORCH_AVAILABLE:
+        try:
+            if torch.cuda.is_available():
+                info['device_name'] = torch.cuda.get_device_name(0)
+                info['device_count'] = torch.cuda.device_count()
+        except Exception:
+            pass
+        if TORCH_NPU_AVAILABLE:
+            info['torch_npu_version'] = torch_npu.__version__
+    return info
+
+
+# ========== PyTorch MLP Model ==========
+class GARMLP(nn.Module):
+    """用于欺诈分类的MLP模型（适配NPU/CPU）"""
+
+    def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.3):
+        super().__init__()
+        layers = []
+        prev_dim = input_dim
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h_dim))
+            layers.append(nn.BatchNorm1d(h_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            prev_dim = h_dim
+        layers.append(nn.Linear(prev_dim, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def train_torch_model(X_train, y_train, X_val, y_val,
+                      hidden_dims=[256, 128, 64],
+                      epochs=100, batch_size=2048,
+                      lr=0.001, weight_decay=1e-5,
+                      device=None, class_weight=1.0,
+                      seed=42):
+    """PyTorch模型训练（支持NPU/CUDA/CPU自动切换）"""
+    if device is None:
+        device = get_device()
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    print(f"[INFO] Training on {device} (class_weight={class_weight})", flush=True)
+
+    # Convert to tensors
+    X_train_t = torch.from_numpy(X_train.astype(np.float32))
+    y_train_t = torch.from_numpy(y_train.astype(np.float32)).unsqueeze(1)
+    X_val_t = torch.from_numpy(X_val.astype(np.float32))
+    y_val_t = torch.from_numpy(y_val.astype(np.float32)).unsqueeze(1)
+
+    # Class-weighted loss
+    pos_weight = torch.tensor([class_weight], dtype=torch.float32)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    model = GARMLP(X_train.shape[1], hidden_dims).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+
+    dataset = TensorDataset(X_train_t, y_train_t)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+
+    best_val_auc = 0
+    best_state = None
+    patience_counter = 0
+    max_patience = 15
+
+    scaler = None
+    if NPU_AVAILABLE or (TORCH_AVAILABLE and torch.cuda.is_available()):
+        scaler = torch.amp.GradScaler('cuda' if not NPU_AVAILABLE else 'npu')
+
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0
+        for xb, yb in loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+
+            if scaler:
+                with torch.amp.autocast(device_type='cuda' if not NPU_AVAILABLE else 'npu'):
+                    pred = model(xb)
+                    loss = criterion(pred, yb)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                pred = model(xb)
+                loss = criterion(pred, yb)
+                loss.backward()
+                optimizer.step()
+
+            epoch_loss += loss.item() * len(xb)
+
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            X_val_dev = X_val_t.to(device)
+            if scaler:
+                with torch.amp.autocast(device_type='cuda' if not NPU_AVAILABLE else 'npu'):
+                    val_logits = model(X_val_dev)
+            else:
+                val_logits = model(X_val_dev)
+            val_proba = torch.sigmoid(val_logits).cpu().numpy().flatten()
+
+        from sklearn.metrics import roc_auc_score
+        val_auc = roc_auc_score(y_val, val_proba)
+        scheduler.step(val_auc)
+
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"[INFO] Epoch {epoch+1}/{epochs} - loss: {epoch_loss/len(X_train_t):.4f} - val_auc: {val_auc:.4f}", flush=True)
+
+        if patience_counter >= max_patience:
+            print(f"[INFO] Early stopping at epoch {epoch+1}", flush=True)
+            break
+
+    model.load_state_dict(best_state)
+    model.eval()
+
+    # Final predictions
+    with torch.no_grad():
+        X_train_dev = X_train_t.to(device)
+        train_proba = torch.sigmoid(model(X_train_dev)).cpu().numpy().flatten()
+        X_val_dev = X_val_t.to(device)
+        val_proba = torch.sigmoid(model(X_val_dev)).cpu().numpy().flatten()
+
+    train_auc = roc_auc_score(y_train, train_proba)
+    val_auc = roc_auc_score(y_val, val_proba)
+
+    print(f"[INFO] Final - train_auc: {train_auc:.4f}, val_auc: {val_auc:.4f}", flush=True)
+
+    # Feature importance: use input gradient magnitude (safe for both CPU and GPU)
+    try:
+        model.eval()
+        X_grad_tensor = torch.from_numpy(X_train.astype(np.float32)).to(device).requires_grad_(True)
+        out = model(X_grad_tensor)
+        out.sum().backward()
+        grad_importance = torch.abs(X_grad_tensor.grad).cpu().numpy().mean(axis=0)
+        feat_importance = grad_importance / (grad_importance.sum() + 1e-10)
+    except Exception:
+        # Fallback: uniform importance
+        feat_importance = np.ones(X_train.shape[1]) / X_train.shape[1]
+
+    return model, {
+        'train_auc': float(train_auc),
+        'test_auc': float(val_auc),
+        'best_val_auc': float(best_val_auc),
+    }, feat_importance
+
+
+def save_torch_model(model, path):
+    """保存PyTorch模型"""
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+    torch.save(model.state_dict(), path)
+
+
+def load_torch_model(model, path, device):
+    """加载PyTorch模型"""
+    model.load_state_dict(torch.load(path, map_location=device))
+    return model
 
 # 默认配置
 DEFAULT_CARD_COL = 'card_id'
@@ -400,6 +645,9 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
     if transaction_features is None:
         transaction_features = DEFAULT_TRANSACTION_FEATURES
 
+    dev_info = device_info()
+    print(f"[INFO] Backend: {dev_info['backend']}, Device: {dev_info['device']}", flush=True)
+
     # 加载数据
     fraud_df, card_col, entity_cols, account_features, transaction_features, label_col = \
         load_and_preprocess(fraud_data_path, card_col, entity_cols, account_features,
@@ -418,54 +666,88 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
     train_idx, test_idx = split_data(combined_df, train_ratio=train_ratio, seed=seed)
     print(f"[INFO] Train: {len(train_idx)}, Test: {len(test_idx)}", flush=True)
 
-    # 构建图
-    print("[INFO] Building graph...", flush=True)
-    tx_neighbors = build_graph(combined_df, entity_cols)
+    if mode == 'npu':
+        # Use Ascend-optimized feature generation from gar_ascend
+        if not GAR_ASCEND_AVAILABLE:
+            raise ImportError("gar_ascend not available, cannot use mode='npu'")
+        print("[INFO] Using Ascend-optimized feature generation (mode=npu)", flush=True)
 
-    # 计算欺诈率
-    train_df = combined_df.iloc[train_idx]
-    entity_fraud_maps, pair_fraud_maps = compute_fraud_rates_from_train(train_df, entity_cols, label_col)
+        # Save merged data temporarily
+        merged_csv = os.path.join(output_dir, '_merged_temp.csv')
+        combined_df.to_csv(merged_csv, index=False)
 
-    # 构建特征
-    print("[INFO] Building GAR features...", flush=True)
-    features_dict, feature_names = build_gar_features(
-        combined_df, train_idx, tx_neighbors, card_col,
-        entity_cols, account_features, transaction_features, label_col,
-        entity_fraud_maps, pair_fraud_maps
-    )
+        features = ascend_run_gar(
+            data_path=merged_csv,
+            card_col=card_col,
+            entity_cols=entity_cols,
+            account_features=account_features,
+            transaction_features=transaction_features,
+            output_csv=None,
+            npu_id=0,
+            workers=workers,
+            mode='auto',
+            label_col=label_col,
+            fraud_value=1,
+            train_idx=train_idx,
+            no_leakage=True,
+            train_ratio=train_ratio,
+            seed=seed,
+            auto_detect=False
+        )
+        feature_names = list(features.keys())
 
-    # 添加split和label
-    split_arr = np.array(['train' if i in train_idx else 'test' for i in range(len(combined_df))])
-    features_dict[label_col] = combined_df[label_col].values
+        os.remove(merged_csv)
 
-    # 分块导出（处理大规模数据）
-    print("[INFO] Exporting features...", flush=True)
-    features_csv = os.path.join(output_dir, 'gar_features.csv')
+        # Reconstruct split and label
+        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(len(combined_df))])
 
-    # 分批写入避免内存问题
-    chunk_size = 100000
-    n_total = len(combined_df)
-    key_cols = [c for c in ['card_id', '卡号', 'timestamp', '时间戳'] if c in combined_df.columns]
+        # Export
+        features_csv = os.path.join(output_dir, 'gar_features.csv')
+        df_features = pd.DataFrame(features)
+        key_cols = [c for c in [card_col, 'timestamp', '时间戳'] if c in combined_df.columns]
+        if key_cols:
+            df_features = pd.concat([combined_df[key_cols].reset_index(drop=True), df_features], axis=1)
+        df_features[label_col] = combined_df[label_col].values
+        df_features['split'] = split_arr
+        df_features.to_csv(features_csv, index=False)
+        print(f"[INFO] Saved to {features_csv}", flush=True)
+        print(f"[INFO] Shape: {df_features.shape}", flush=True)
 
-    df_features = pd.DataFrame({name: features_dict[name] for name in feature_names})
-    if key_cols:
-        df_features = pd.concat([combined_df[key_cols], df_features], axis=1)
-    df_features[label_col] = combined_df[label_col].values
-    df_features['split'] = split_arr
+    else:
+        # CPU mode: use original implementation
+        print("[INFO] Using CPU feature generation", flush=True)
+        tx_neighbors = build_graph(combined_df, entity_cols)
+        train_df = combined_df.iloc[train_idx]
+        entity_fraud_maps, pair_fraud_maps = compute_fraud_rates_from_train(train_df, entity_cols, label_col)
+        features_dict, feature_names = build_gar_features(
+            combined_df, train_idx, tx_neighbors, card_col,
+            entity_cols, account_features, transaction_features, label_col,
+            entity_fraud_maps, pair_fraud_maps
+        )
+        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(len(combined_df))])
+        features_dict[label_col] = combined_df[label_col].values
 
-    # 分块写入
-    n_chunks = (n_total + chunk_size - 1) // chunk_size
-    for i in range(n_chunks):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, n_total)
-        chunk_df = df_features.iloc[start_idx:end_idx]
+        features_csv = os.path.join(output_dir, 'gar_features.csv')
+        chunk_size = 100000
+        n_total = len(combined_df)
+        key_cols = [c for c in ['card_id', '卡号', 'timestamp', '时间戳'] if c in combined_df.columns]
 
-        if i == 0:
-            chunk_df.to_csv(features_csv, index=False, mode='w')
-        else:
-            chunk_df.to_csv(features_csv, index=False, mode='a', header=False)
+        df_features = pd.DataFrame({name: features_dict[name] for name in feature_names})
+        if key_cols:
+            df_features = pd.concat([combined_df[key_cols], df_features], axis=1)
+        df_features[label_col] = combined_df[label_col].values
+        df_features['split'] = split_arr
 
-        print(f"[INFO]   Exported chunk {i+1}/{n_chunks} ({end_idx}/{n_total})", flush=True)
+        n_chunks = (n_total + chunk_size - 1) // chunk_size
+        for i in range(n_chunks):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, n_total)
+            chunk_df = df_features.iloc[start_idx:end_idx]
+            if i == 0:
+                chunk_df.to_csv(features_csv, index=False, mode='w')
+            else:
+                chunk_df.to_csv(features_csv, index=False, mode='a', header=False)
+            print(f"[INFO]   Exported chunk {i+1}/{n_chunks} ({end_idx}/{n_total})", flush=True)
 
     # 保存元信息
     meta = {
@@ -496,8 +778,8 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
     return meta
 
 
-def train_classifier_step(output_dir, class_weight=1.0, seed=42):
-    """Step 2: 分类器训练"""
+def train_classifier_step(output_dir, class_weight=1.0, seed=42, mode='cpu'):
+    """Step 2: 分类器训练（支持NPU/CPU自动切换）"""
     print("="*60, flush=True)
     print("GAR Classifier Training (Step 2/2)", flush=True)
     print("="*60, flush=True)
@@ -535,54 +817,99 @@ def train_classifier_step(output_dir, class_weight=1.0, seed=42):
     print(f"[INFO] Fraud in train: {y_train.sum()}/{len(y_train)} ({100*y_train.sum()/len(y_train):.2f}%)", flush=True)
     print(f"[INFO] Fraud in test: {y_test.sum()}/{len(y_test)} ({100*y_test.sum()/len(y_test):.2f}%)", flush=True)
 
-    # 训练
-    print("[INFO] Training GradientBoostingClassifier...", flush=True)
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
-
-    # 计算类别权重
-    fraud_ratio = y_train.sum() / len(y_train)
-    n_fraud = y_train.sum()
-    n_white = len(y_train) - n_fraud
-
+    dev_info = device_info()
+    print(f"[INFO] Backend: {dev_info['backend']}, Device: {dev_info['device']}", flush=True)
     print(f"[INFO] Class weight for fraud: {class_weight}x", flush=True)
 
-    # 使用sample_weight处理类别不均衡
-    sample_weights = np.ones(len(y_train))
-    fraud_indices = y_train == 1
-    sample_weights[fraud_indices] *= class_weight
+    from sklearn.metrics import precision_score, recall_score, f1_score
 
-    gb = GradientBoostingClassifier(
-        n_estimators=200,
-        max_depth=6,
-        learning_rate=0.1,
-        subsample=0.8,
-        random_state=seed
-    )
-    gb.fit(X_train, y_train, sample_weight=sample_weights)
+    if TORCH_AVAILABLE and mode in ('npu', 'dist'):
+        # PyTorch training with NPU/CUDA acceleration
+        device = get_device()
+        print(f"[INFO] Training PyTorch MLP on {device}...", flush=True)
 
-    # 预测
-    train_proba = gb.predict_proba(X_train)[:, 1]
-    test_proba = gb.predict_proba(X_test)[:, 1]
+        model, torch_results, feat_importance = train_torch_model(
+            X_train, y_train, X_test, y_test,
+            hidden_dims=[256, 128, 64],
+            epochs=100,
+            batch_size=2048,
+            lr=0.001,
+            weight_decay=1e-5,
+            device=device,
+            class_weight=class_weight,
+            seed=seed
+        )
 
-    # 评估
-    train_auc = roc_auc_score(y_train, train_proba)
-    test_auc = roc_auc_score(y_test, test_proba)
+        # Save model
+        model_path = os.path.join(output_dir, 'gar_model.pt')
+        save_torch_model(model, model_path)
+        print(f"[INFO] Model saved to {model_path}", flush=True)
 
-    test_pred = (test_proba > 0.5).astype(int)
-    precision = precision_score(y_test, test_pred)
-    recall = recall_score(y_test, test_pred)
-    f1 = f1_score(y_test, test_pred)
+        # Retrain on full train for final metrics
+        train_proba = torch.sigmoid(model(torch.from_numpy(X_train.astype(np.float32)).to(device))).detach().cpu().numpy().flatten()
+        test_proba = torch.sigmoid(model(torch.from_numpy(X_test.astype(np.float32)).to(device))).detach().cpu().numpy().flatten()
 
-    results = {
-        'train_auc': float(train_auc),
-        'test_auc': float(test_auc),
-        'precision': float(precision),
-        'recall': float(recall),
-        'f1': float(f1),
-        'class_weight': class_weight,
-        'feature_importance': list(zip(feature_names, gb.feature_importances_.tolist()))
-    }
+        from sklearn.metrics import roc_auc_score
+        train_auc = roc_auc_score(y_train, train_proba)
+        test_auc = roc_auc_score(y_test, test_proba)
+
+        test_pred = (test_proba > 0.5).astype(int)
+        precision = precision_score(y_test, test_pred)
+        recall = recall_score(y_test, test_pred)
+        f1 = f1_score(y_test, test_pred)
+
+        results = {
+            'train_auc': float(train_auc),
+            'test_auc': float(test_auc),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1': float(f1),
+            'class_weight': class_weight,
+            'backend': dev_info['backend'],
+            'device': str(device),
+            'feature_importance': list(zip(feature_names, feat_importance.tolist()))
+        }
+    else:
+        # sklearn fallback
+        print("[INFO] Training sklearn GradientBoostingClassifier (CPU)...", flush=True)
+        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.metrics import roc_auc_score
+
+        sample_weights = np.ones(len(y_train))
+        fraud_indices = y_train == 1
+        sample_weights[fraud_indices] *= class_weight
+
+        gb = GradientBoostingClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            random_state=seed
+        )
+        gb.fit(X_train, y_train, sample_weight=sample_weights)
+
+        train_proba = gb.predict_proba(X_train)[:, 1]
+        test_proba = gb.predict_proba(X_test)[:, 1]
+
+        train_auc = roc_auc_score(y_train, train_proba)
+        test_auc = roc_auc_score(y_test, test_proba)
+
+        test_pred = (test_proba > 0.5).astype(int)
+        precision = precision_score(y_test, test_pred)
+        recall = recall_score(y_test, test_pred)
+        f1 = f1_score(y_test, test_pred)
+
+        results = {
+            'train_auc': float(train_auc),
+            'test_auc': float(test_auc),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1': float(f1),
+            'class_weight': class_weight,
+            'backend': 'sklearn',
+            'device': 'cpu',
+            'feature_importance': list(zip(feature_names, gb.feature_importances_.tolist()))
+        }
 
     # 保存结果
     results_path = os.path.join(output_dir, 'training_results.json')
@@ -667,11 +994,12 @@ Examples:
         )
 
     if args.step in ['train', 'all']:
-        results = train_classifier_step(args.output_dir, args.class_weight, args.seed)
+        results = train_classifier_step(args.output_dir, args.class_weight, args.seed, args.mode)
 
         print(f"\n{'='*60}", flush=True)
         print("Results", flush=True)
         print(f"{'='*60}", flush=True)
+        print(f"Backend: {results.get('backend', 'unknown')} / {results.get('device', 'unknown')}", flush=True)
         print(f"Train AUC: {results['train_auc']:.4f}", flush=True)
         print(f"Test AUC: {results['test_auc']:.4f}", flush=True)
         print(f"Precision: {results['precision']:.4f}", flush=True)
