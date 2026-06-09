@@ -704,41 +704,57 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
         white_count_val = int(n_total - fraud_count_val)
         split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)])
 
-        # Export with chunking
+        # Export directly to CSV in chunks (avoid constructing full DataFrame in memory)
         features_csv = os.path.join(output_dir, 'gar_features.csv')
-        print(f"[INFO] Building feature DataFrame ({len(feature_names)} features, {n_total} rows)...", flush=True)
-        df_features = pd.DataFrame(features)
-        print(f"[INFO] Feature DataFrame built, memory usage estimated...", flush=True)
-
         key_cols = [c for c in [card_col, 'timestamp', '时间戳'] if c in combined_df.columns]
-        if key_cols:
-            print(f"[INFO] Adding key columns: {key_cols}", flush=True)
-            df_features = pd.concat([combined_df[key_cols].reset_index(drop=True), df_features], axis=1)
-        df_features[label_col] = combined_df[label_col].values
-        df_features['split'] = split_arr
 
-        print(f"[INFO] Exporting to CSV ({n_total} rows)...", flush=True)
-        export_start = time.time()
+        print(f"[INFO] Preparing CSV export ({n_total} rows, {len(feature_names)} features)...", flush=True)
+
         chunk_size = 500000
-        if n_total > chunk_size:
-            n_chunks = (n_total + chunk_size - 1) // chunk_size
-            for i in range(n_chunks):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, n_total)
-                chunk_df = df_features.iloc[start_idx:end_idx]
-                if i == 0:
-                    chunk_df.to_csv(features_csv, index=False, mode='w')
-                else:
-                    chunk_df.to_csv(features_csv, index=False, mode='a', header=False)
-                print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written", flush=True)
-        else:
-            df_features.to_csv(features_csv, index=False)
-        export_time = time.time() - export_start
+        n_chunks = (n_total + chunk_size - 1) // chunk_size
+
+        import csv
+        for i in range(n_chunks):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, n_total)
+            n_chunk = end_idx - start_idx
+
+            # Build row array: key_cols + feature_names + label_col + split
+            header_row = key_cols + feature_names + [label_col, 'split']
+            if i == 0:
+                # Write header
+                with open(features_csv, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header_row)
+                print(f"[INFO] CSV header written: {len(header_row)} columns", flush=True)
+
+            # Collect rows for this chunk
+            rows = []
+            print(f"[INFO]   Chunk {i+1}/{n_chunks}: collecting {n_chunk} rows...", flush=True)
+            for j in range(start_idx, end_idx):
+                row = []
+                for c in key_cols:
+                    row.append(combined_df[c].iloc[j])
+                for fname in feature_names:
+                    row.append(features[fname][j])
+                row.append(combined_df[label_col].iloc[j])
+                row.append(split_arr[j])
+                rows.append(row)
+
+            with open(features_csv, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+
+            print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written", flush=True)
+            del rows
+            gc.collect()
+
+        export_time = time.time() - start_time
         print(f"[INFO] Saved to {features_csv}", flush=True)
-        print(f"[INFO] Shape: {df_features.shape}, export time: {export_time:.1f}s", flush=True)
+        print(f"[INFO] Total rows: {n_total}, export time: {export_time:.1f}s", flush=True)
 
         # Free memory
-        del combined_df, df_features, features
+        del combined_df, features
         gc.collect()
         print("[INFO] Memory cleaned up.", flush=True)
 
@@ -753,30 +769,51 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
             entity_cols, account_features, transaction_features, label_col,
             entity_fraud_maps, pair_fraud_maps
         )
-        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(len(combined_df))])
-        features_dict[label_col] = combined_df[label_col].values
-
-        features_csv = os.path.join(output_dir, 'gar_features.csv')
-        chunk_size = 100000
         n_total = len(combined_df)
+        fraud_count_val = int(combined_df[label_col].sum())
+        white_count_val = int(n_total - fraud_count_val)
+        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)])
         key_cols = [c for c in ['card_id', '卡号', 'timestamp', '时间戳'] if c in combined_df.columns]
 
-        df_features = pd.DataFrame({name: features_dict[name] for name in feature_names})
-        if key_cols:
-            df_features = pd.concat([combined_df[key_cols], df_features], axis=1)
-        df_features[label_col] = combined_df[label_col].values
-        df_features['split'] = split_arr
+        features_csv = os.path.join(output_dir, 'gar_features.csv')
+        print(f"[INFO] Preparing CSV export ({n_total} rows, {len(feature_names)} features)...", flush=True)
 
+        import csv
+        chunk_size = 100000
         n_chunks = (n_total + chunk_size - 1) // chunk_size
         for i in range(n_chunks):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, n_total)
-            chunk_df = df_features.iloc[start_idx:end_idx]
+            n_chunk = end_idx - start_idx
+
+            header_row = key_cols + feature_names + [label_col, 'split']
             if i == 0:
-                chunk_df.to_csv(features_csv, index=False, mode='w')
-            else:
-                chunk_df.to_csv(features_csv, index=False, mode='a', header=False)
-            print(f"[INFO]   Exported chunk {i+1}/{n_chunks} ({end_idx}/{n_total})", flush=True)
+                with open(features_csv, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header_row)
+                print(f"[INFO] CSV header written: {len(header_row)} columns", flush=True)
+
+            rows = []
+            for j in range(start_idx, end_idx):
+                row = []
+                for c in key_cols:
+                    row.append(combined_df[c].iloc[j])
+                for fname in feature_names:
+                    row.append(features_dict[fname][j])
+                row.append(combined_df[label_col].iloc[j])
+                row.append(split_arr[j])
+                rows.append(row)
+
+            with open(features_csv, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+
+            print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written", flush=True)
+            del rows
+            gc.collect()
+
+        del combined_df, features_dict
+        gc.collect()
 
     # 保存元信息
     meta = {
