@@ -5,7 +5,7 @@ Ascend NPU加速GAR特征生成器
 支持无数据泄漏模式。
 
 用法:
-    # Ascend NPU模式（无泄漏）
+    # Ascend NPU模式(无泄漏)
     python src/gar/gar_ascend.py --data /path/to/data.csv \\
                                  --card-col card_id \\
                                  --output-csv ./features.csv
@@ -71,7 +71,7 @@ DEFAULT_ACCOUNT_FEATURES = ['card_level', 'card_location', 'card_type']
 DEFAULT_TRANSACTION_FEATURES = ['amount', 'balance', 'is_cross_border']
 DEFAULT_NEIGHBOR_THRESHOLD = 300
 
-# 标准列名到可能列名的映射（用于自动检测）
+# 标准列名到可能列名的映射(用于自动检测)
 COLUMN_ALIASES = {
     'card_id': ['card_id', 'card', 'card_no', '卡号', '银行卡号', 'customer_id', 'customer'],
     'timestamp': ['timestamp', 'time', 'datetime', 'trans_time', 'transaction_time', '时间戳', '交易时间', 'tx_datetime', 'trans_datetime'],
@@ -209,7 +209,7 @@ def split_data(df, train_ratio=0.7, seed=42):
 
 
 def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
-    """从训练集计算欺诈率映射（避免数据泄漏）"""
+    """从训练集计算欺诈率映射(避免数据泄漏)"""
     entity_fraud_maps = {}
     for col in entity_cols:
         if col in train_df.columns:
@@ -232,7 +232,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
                                   entity_fraud_maps=None, pair_fraud_maps=None,
                                   no_leakage=False, train_idx_set=None, train_label_map=None,
                                   show_progress=True):
-    """构建GAR特征（优化版本：向量化+稀疏图）"""
+    """构建GAR特征(优化版本：向量化+稀疏图)"""
     if show_progress and len(df) > 100000:
         print(f"[INFO]   Processing {len(df)} records, feature engineering started...", flush=True)
 
@@ -260,7 +260,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
             cats = df[col].astype('category')
             features[col] = cats.cat.codes.values.astype(np.int32)
 
-    # ========== 2. 实体频率（向量化） ==========
+    # ========== 2. 实体频率(向量化) ==========
     for col in entity_cols:
         if col not in df_columns:
             continue
@@ -269,7 +269,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         features[f'{col}_freq'] = np.array([freq_map.get(v, 0) for v in values], dtype=np.float32)
         features[f'{col}_freq_log'] = np.log1p(features[f'{col}_freq']).astype(np.float32)
 
-    # ========== 3. 卡号聚合特征（向量化优化） ==========
+    # ========== 3. 卡号聚合特征(向量化优化) ==========
     if card_col in df_columns:
         card_values = df[card_col].values
         card_counts = global_stats.get('card_tx_count', {})
@@ -312,7 +312,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         else:
             features[col] = df[col].fillna(-1).values
 
-    # ========== 5. 图特征（优化：预计算度） ==========
+    # ========== 5. 图特征(优化：预计算度) ==========
     # 预计算所有节点的1跳邻居数量
     degrees = np.array([len(tx_neighbors.get(i, set())) for i in range(n)], dtype=np.int32)
     features['n_1hop'] = degrees
@@ -347,7 +347,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         features['amt_1hop_mean'] = amt_1hop_mean
         features['amt_1hop_std'] = amt_1hop_std
 
-    # ========== 6. 配对频率（向量化） ==========
+    # ========== 6. 配对频率(向量化) ==========
     for i, col1 in enumerate(entity_cols[:4]):
         for col2 in entity_cols[i+1:5]:
             if col1 not in df_columns or col2 not in df_columns:
@@ -371,7 +371,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
                 pass
             break
 
-       # ========== 8. GAR Fraud Rate特征（无泄漏模式） ==========
+       # ========== 8. GAR Fraud Rate特征(无泄漏模式) ==========
     if len(df) > 100000:
         print(f"[INFO]   Section 2/4: Fraud rate features (no leakage)", flush=True)
     if has_label and label_col:
@@ -390,7 +390,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
                 pair_values = (df[col1].astype(str) + '_' + df[col2].astype(str)).values
                 features[f'{col1}_{col2}_pair_fraud_rate'] = np.array([fraud_map.get(p, 0) for p in pair_values], dtype=np.float32)
 
-            # Neighbor Fraud Rate（使用训练集标签）
+            # Neighbor Fraud Rate(使用训练集标签)
             neigh_fraud_rates = np.zeros(n, dtype=np.float32)
             range_iter = range(n) if not TQDM_AVAILABLE else tqdm(range(n), desc="[Features] Neighbor fraud")
             for i in range_iter:
@@ -401,7 +401,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
                         neigh_fraud_rates[i] = np.mean([train_label_map[n] for n in train_neighs])
             features['neigh_fraud_rate'] = neigh_fraud_rates
         else:
-            # 泄漏模式：在全部数据上计算（不推荐）
+            # 泄漏模式：在全部数据上计算(不推荐)
             labels = df[label_col].values
 
             for col in entity_cols:
@@ -517,7 +517,7 @@ def build_gar_features_optimized(df, tx_neighbors, global_stats, entity_cols, ca
         features['tx_velocity_24h'] = np.zeros(n, dtype=np.float32)
         features['amount_velocity_24h'] = np.zeros(n, dtype=np.float32)
 
-    # ========== 12. 扩展特征：风险评分（无泄漏模式） ==========
+    # ========== 12. 扩展特征：风险评分(无泄漏模式) ==========
     if has_label and label_col and no_leakage and train_idx_set is not None:
         try:
             terminal_col = None
@@ -637,11 +637,11 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
             amount_col = col
             break
 
-    # 4. 数据分割（无泄漏模式）
+    # 4. 数据分割(无泄漏模式)
     train_idx_arr, test_idx_arr = split_data(df, train_ratio=train_ratio, seed=seed)
     print(f"[INFO] Data split: Train={len(train_idx_arr)}, Test={len(test_idx_arr)}", flush=True)
 
-    # 5. 计算欺诈率映射（无泄漏模式）
+    # 5. 计算欺诈率映射(无泄漏模式)
     entity_fraud_maps = None
     pair_fraud_maps = None
     train_idx_set = None
@@ -715,7 +715,7 @@ def run_ascend_gar(data_path, card_col, entity_cols, account_features,
     print(f"\n[INFO] Total time: {elapsed/60:.1f} minutes", flush=True)
     print(f"[INFO] Throughput: {len(df)/elapsed:.0f} records/sec", flush=True)
 
-    # 释放临时大对象（仅清除引用，由Python自动gc，不主动触发stop-the-world）
+    # 释放临时大对象(仅清除引用，由Python自动gc，不主动触发stop-the-world)
     del df, tx_neighbors, global_stats
 
     print("[INFO] Feature generation complete, returning to caller...", flush=True)
@@ -742,7 +742,7 @@ Examples:
     )
 
     parser.add_argument('--data', type=str, default=None,
-                        help='CSV文件路径（使用--check-npu时可选）')
+                        help='CSV文件路径(使用--check-npu时可选)')
     parser.add_argument('--card-col', type=str, default=DEFAULT_CARD_COL,
                         help='卡号列名')
     parser.add_argument('--entity-cols', type=str, default=None,
@@ -765,21 +765,21 @@ Examples:
                         choices=['auto', 'cpu', 'npu'],
                         help='运行模式: auto=自动检测, cpu=纯CPU, npu=强制NPU')
     parser.add_argument('--label-col', type=str, default=None,
-                        help='欺诈标签列名（如 isFraud, fraud, label）')
+                        help='欺诈标签列名(如 isFraud, fraud, label)')
     parser.add_argument('--fraud-value', type=int, default=1,
-                        help='表示欺诈的值（默认: 1）')
+                        help='表示欺诈的值(默认: 1)')
     parser.add_argument('--auto-detect', action='store_true', default=True,
-                        help='自动检测列名并映射到标准列名（默认开启）')
+                        help='自动检测列名并映射到标准列名(默认开启)')
     parser.add_argument('--no-auto-detect', action='store_false', dest='auto_detect',
                         help='关闭自动列名检测')
     parser.add_argument('--no-leakage', action='store_true', default=True,
-                        help='防止数据泄漏：欺诈率仅从训练集计算（默认开启）')
+                        help='防止数据泄漏：欺诈率仅从训练集计算(默认开启)')
     parser.add_argument('--leakage', action='store_false', dest='no_leakage',
-                        help='关闭防泄漏模式：欺诈率从全部数据计算（不推荐）')
+                        help='关闭防泄漏模式：欺诈率从全部数据计算(不推荐)')
     parser.add_argument('--train-ratio', type=float, default=0.7,
-                        help='训练集比例（默认: 0.7）')
+                        help='训练集比例(默认: 0.7)')
     parser.add_argument('--seed', type=int, default=42,
-                        help='随机种子（默认: 42）')
+                        help='随机种子(默认: 42)')
 
     args = parser.parse_args()
 

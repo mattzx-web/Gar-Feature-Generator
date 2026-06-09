@@ -5,7 +5,7 @@ NPU加速GAR特征生成器
 1. 邻居金额统计 (amt_1hop_mean, amt_1hop_std)
 2. 邻居欺诈率 (neigh_fraud_rate)
 
-替换为PyTorch NPU向量化操作（gather + reduce）。
+替换为PyTorch NPU向量化操作(gather + reduce)。
 
 用法:
     python src/gar/gar_npu.py --data /path/to/data.csv \\
@@ -205,7 +205,7 @@ def split_data(df, train_ratio=0.7, seed=42):
 
 
 def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
-    """从训练集计算欺诈率映射（避免数据泄漏）"""
+    """从训练集计算欺诈率映射(避免数据泄漏)"""
     entity_fraud_maps = {}
     for col in entity_cols:
         if col in train_df.columns:
@@ -226,7 +226,7 @@ def compute_fraud_rates_from_train(train_df, entity_cols, label_col):
 # ========== NPU-accelerated helper functions ==========
 
 def build_neighbor_tensor_cpu(tx_neighbors, n, degrees):
-    """将 dict-of-sets 图结构转换为 (n, max_degree) 填充张量（CPU侧）"""
+    """将 dict-of-sets 图结构转换为 (n, max_degree) 填充张量(CPU侧)"""
     max_degree = int(max(degrees)) if len(degrees) > 0 else 1
     max_degree = max(max_degree, 1)
 
@@ -325,7 +325,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
                             entity_fraud_maps=None, pair_fraud_maps=None,
                             no_leakage=False, train_idx_set=None, train_label_map=None,
                             show_progress=True):
-    """构建GAR特征（NPU加速版本：热点循环替换为PyTorch NPU操作）"""
+    """构建GAR特征(NPU加速版本：热点循环替换为PyTorch NPU操作)"""
     import torch
 
     if show_progress and len(df) > 100000:
@@ -356,7 +356,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
             cats = df[col].astype('category')
             features[col] = cats.cat.codes.values.astype(np.int32)
 
-    # ========== 2. 实体频率（向量化） ==========
+    # ========== 2. 实体频率(向量化) ==========
     for col in entity_cols:
         if col not in df_columns:
             continue
@@ -365,7 +365,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
         features[f'{col}_freq'] = np.array([freq_map.get(v, 0) for v in values], dtype=np.float32)
         features[f'{col}_freq_log'] = np.log1p(features[f'{col}_freq']).astype(np.float32)
 
-    # ========== 3. 卡号聚合特征（向量化优化） ==========
+    # ========== 3. 卡号聚合特征(向量化优化) ==========
     if card_col in df_columns:
         card_values = df[card_col].values
         card_counts = global_stats.get('card_tx_count', {})
@@ -407,7 +407,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
         else:
             features[col] = df[col].fillna(-1).values
 
-    # ========== 5. 图特征（优化：预计算度 + NPU邻居金额） ==========
+    # ========== 5. 图特征(优化：预计算度 + NPU邻居金额) ==========
     print("[INFO]   Section 5/13: Graph features with NPU neighbor aggregation...", flush=True)
     section5_start = time.time()
 
@@ -469,7 +469,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
         section5_time = time.time() - section5_start
         print(f"[INFO]   Section 5 done in {section5_time:.1f}s total", flush=True)
 
-    # ========== 6. 配对频率（向量化） ==========
+    # ========== 6. 配对频率(向量化) ==========
     for i, col1 in enumerate(entity_cols[:4]):
         for col2 in entity_cols[i+1:5]:
             if col1 not in df_columns or col2 not in df_columns:
@@ -493,7 +493,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
                 pass
             break
 
-    # ========== 8. GAR Fraud Rate特征（NPU邻居欺诈率） ==========
+    # ========== 8. GAR Fraud Rate特征(NPU邻居欺诈率) ==========
     if show_progress and len(df) > 100000:
         print(f"[INFO]   Section 8/13: Fraud rate features with NPU neighbor aggregation...", flush=True)
     section8_start = time.time()
@@ -672,7 +672,7 @@ def build_gar_features_npu(df, tx_neighbors, global_stats, entity_cols, card_col
         features['tx_velocity_24h'] = np.zeros(n, dtype=np.float32)
         features['amount_velocity_24h'] = np.zeros(n, dtype=np.float32)
 
-    # ========== 12. 扩展特征：风险评分（无泄漏模式） ==========
+    # ========== 12. 扩展特征：风险评分(无泄漏模式) ==========
     if show_progress and len(df) > 100000:
         print(f"[INFO]   Section 12/13: Risk scores", flush=True)
     if has_label and label_col and no_leakage and train_idx_set is not None:
