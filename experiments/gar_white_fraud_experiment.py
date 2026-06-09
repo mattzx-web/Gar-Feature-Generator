@@ -696,48 +696,47 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
         )
 
         os.remove(merged_csv)
-        print("[INFO] Merged CSV removed, building final feature DataFrame...", flush=True)
+        print("[INFO] Merged CSV removed, preparing CSV export...", flush=True)
 
-        # Capture stats before deleting combined_df
+        # Capture stats and convert combined_df columns to numpy arrays BEFORE deleting anything
         n_total = len(combined_df)
         fraud_count_val = int(combined_df[label_col].sum())
         white_count_val = int(n_total - fraud_count_val)
-        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)])
+        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)], dtype=np.object_)
 
-        # Export directly to CSV in chunks (avoid constructing full DataFrame in memory)
-        features_csv = os.path.join(output_dir, 'gar_features.csv')
         key_cols = [c for c in [card_col, 'timestamp', '时间戳'] if c in combined_df.columns]
+        key_col_arrays = {c: combined_df[c].values for c in key_cols}
+        label_arr = combined_df[label_col].values
+        del combined_df
+        gc.collect()
 
-        print(f"[INFO] Preparing CSV export ({n_total} rows, {len(feature_names)} features)...", flush=True)
+        features_csv = os.path.join(output_dir, 'gar_features.csv')
+        print(f"[INFO] Exporting {n_total} rows, {len(feature_names)} features...", flush=True)
+
+        import csv
+        header_row = key_cols + feature_names + [label_col, 'split']
+        with open(features_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(header_row)
+        print(f"[INFO] CSV header written: {len(header_row)} columns", flush=True)
 
         chunk_size = 500000
         n_chunks = (n_total + chunk_size - 1) // chunk_size
-
-        import csv
         for i in range(n_chunks):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, n_total)
             n_chunk = end_idx - start_idx
 
-            # Build row array: key_cols + feature_names + label_col + split
-            header_row = key_cols + feature_names + [label_col, 'split']
-            if i == 0:
-                # Write header
-                with open(features_csv, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(header_row)
-                print(f"[INFO] CSV header written: {len(header_row)} columns", flush=True)
+            print(f"[INFO]   Chunk {i+1}/{n_chunks}: writing rows {start_idx}-{end_idx}...", flush=True)
+            chunk_start = time.time()
 
-            # Collect rows for this chunk
+            # Vectorized slice per column: convert position-based, no label lookup
             rows = []
-            print(f"[INFO]   Chunk {i+1}/{n_chunks}: collecting {n_chunk} rows...", flush=True)
             for j in range(start_idx, end_idx):
-                row = []
-                for c in key_cols:
-                    row.append(combined_df[c].iloc[j])
+                row = [key_col_arrays[c][j] for c in key_cols]
                 for fname in feature_names:
                     row.append(features[fname][j])
-                row.append(combined_df[label_col].iloc[j])
+                row.append(label_arr[j])
                 row.append(split_arr[j])
                 rows.append(row)
 
@@ -745,16 +744,17 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
                 writer = csv.writer(f)
                 writer.writerows(rows)
 
-            print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written", flush=True)
+            chunk_time = time.time() - chunk_start
+            speed = n_chunk / chunk_time
+            print(f"[INFO]   Chunk {i+1}/{n_chunks} ({end_idx}/{n_total}) written in {chunk_time:.1f}s ({speed:.0f} rows/sec)", flush=True)
             del rows
             gc.collect()
 
-        export_time = time.time() - start_time
-        print(f"[INFO] Saved to {features_csv}", flush=True)
-        print(f"[INFO] Total rows: {n_total}, export time: {export_time:.1f}s", flush=True)
+        print(f"[INFO] CSV export complete: {features_csv}", flush=True)
 
-        # Free memory
-        del combined_df, features
+        del key_col_arrays, label_arr, split_arr
+        gc.collect()
+        del features
         gc.collect()
         print("[INFO] Memory cleaned up.", flush=True)
 
