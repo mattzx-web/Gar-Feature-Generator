@@ -923,6 +923,17 @@ def train_classifier_step(output_dir, class_weight=1.0, seed=42, mode='cpu'):
     df_features = pd.read_csv(os.path.join(output_dir, 'gar_features.csv'))
     print(f"[INFO]   Records: {len(df_features)}, Features: {len(df_features.columns)}", flush=True)
 
+    # Fallback: auto-detect label column if stored name doesn't exist in CSV
+    if label_col not in df_features.columns:
+        print(f"[WARN] Label column '{label_col}' not found in CSV, auto-detecting...", flush=True)
+        for col in ['isFraud', 'fraud', 'label', 'is_fraud']:
+            if col in df_features.columns:
+                label_col = col
+                print(f"[INFO]   Using '{label_col}' as label column", flush=True)
+                break
+        if label_col not in df_features.columns:
+            raise ValueError(f"Could not find label column in {df_features.columns.tolist()}")
+
     # 分割
     train_mask = df_features['split'] == 'train'
     test_mask = df_features['split'] == 'test'
