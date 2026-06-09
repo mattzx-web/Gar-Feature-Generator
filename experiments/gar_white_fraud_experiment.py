@@ -725,23 +725,6 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
             )
         else:
             raise ImportError("Neither gar_npu nor gar_ascend available for NPU mode")
-            data_path=merged_csv,
-            card_col=card_col,
-            entity_cols=entity_cols,
-            account_features=account_features,
-            transaction_features=transaction_features,
-            output_csv=None,
-            npu_id=0,
-            workers=workers,
-            mode='auto',
-            label_col=label_col,
-            fraud_value=1,
-            train_idx=train_idx,
-            no_leakage=True,
-            train_ratio=train_ratio,
-            seed=seed,
-            auto_detect=False
-        )
 
         os.remove(merged_csv)
         print("[INFO] Merged CSV removed, preparing CSV export...", flush=True)
