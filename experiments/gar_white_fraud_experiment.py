@@ -1,11 +1,11 @@
 """
-GAR白样本+欺诈样本实验(优化版)
+GAR白样本+欺诈样本实验（优化版）
 
-支持大规模不均衡数据(1:20~1:40)，特征生成与分类器训练分离。
-支持Ascend NPU加速(特征生成+模型训练)。
+支持大规模不均衡数据（1:20~1:40），特征生成与分类器训练分离。
+支持Ascend NPU加速（特征生成+模型训练）。
 
 用法:
-    # Step 1: 生成特征(NPU加速)
+    # Step 1: 生成特征（NPU加速）
     python experiments/gar_white_fraud_experiment.py \
         --fraud-data ./data/fraud.csv \
         --white-data ./data/white.csv \
@@ -13,7 +13,7 @@ GAR白样本+欺诈样本实验(优化版)
         --step generate \
         --mode npu
 
-    # Step 2: 训练分类器(NPU加速)
+    # Step 2: 训练分类器（NPU加速）
     python experiments/gar_white_fraud_experiment.py \
         --fraud-data ./data/fraud.csv \
         --white-data ./data/white.csv \
@@ -21,7 +21,7 @@ GAR白样本+欺诈样本实验(优化版)
         --step train \
         --mode npu
 
-    # 一步完成(CPU)
+    # 一步完成（CPU）
     python experiments/gar_white_fraud_experiment.py \
         --fraud-data ./data/fraud.csv \
         --white-data ./data/white.csv \
@@ -38,6 +38,7 @@ import time
 import json
 import gc
 from datetime import datetime
+import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -133,10 +134,35 @@ def device_info():
             info['torch_npu_version'] = torch_npu.__version__
     return info
 
+def safe_remove(path, max_retries=3, delay=1.0):
+    """Try to remove a file safely with retries and a subprocess fallback."""
+    if not path:
+        return
+    try:
+        if not os.path.exists(path):
+            return
+    except Exception:
+        pass
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            os.remove(path)
+            return
+        except Exception:
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            time.sleep(delay)
+
+    try:
+        subprocess.run(['rm', '-f', path], check=False)
+    except Exception:
+        pass
 
 # ========== PyTorch MLP Model ==========
 class GARMLP(nn.Module):
-    """用于欺诈分类的MLP模型(适配NPU/CPU)"""
+    """用于欺诈分类的MLP模型（适配NPU/CPU）"""
 
     def __init__(self, input_dim, hidden_dims=[256, 128, 64], dropout=0.3):
         super().__init__()
@@ -161,7 +187,7 @@ def train_torch_model(X_train, y_train, X_val, y_val,
                       lr=0.001, weight_decay=1e-5,
                       device=None, class_weight=1.0,
                       seed=42):
-    """PyTorch模型训练(支持NPU/CUDA/CPU自动切换)"""
+    """PyTorch模型训练（支持NPU/CUDA/CPU自动切换）"""
     if device is None:
         device = get_device()
 
@@ -700,6 +726,7 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
                 seed=seed,
                 auto_detect=False
             )
+            safe_remove(merged_csv)
         elif GAR_ASCEND_AVAILABLE:
             print("[INFO] Using Ascend-optimized feature generation (mode=npu)", flush=True)
             merged_csv = os.path.join(output_dir, '_merged_temp.csv')
@@ -723,10 +750,9 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
                 seed=seed,
                 auto_detect=False
             )
+            safe_remove(merged_csv)
         else:
             raise ImportError("Neither gar_npu nor gar_ascend available for NPU mode")
-
-        os.remove(merged_csv)
         print("[INFO] Merged CSV removed, preparing CSV export...", flush=True)
 
         # Capture stats and convert combined_df columns to numpy arrays BEFORE deleting anything
@@ -876,7 +902,7 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
 
 
 def train_classifier_step(output_dir, class_weight=1.0, seed=42, mode='cpu'):
-    """Step 2: 分类器训练(支持NPU/CPU自动切换)"""
+    """Step 2: 分类器训练（支持NPU/CPU自动切换）"""
     print("="*60, flush=True)
     print("GAR Classifier Training (Step 2/2)", flush=True)
     print("="*60, flush=True)
@@ -1032,7 +1058,7 @@ Examples:
       --output-dir ./outputs/exp \\
       --step generate
 
-  # Step 2: 训练分类器(类别权重=20)
+  # Step 2: 训练分类器（类别权重=20）
   python experiments/gar_white_fraud_experiment.py \\
       --fraud-data ./data/fraud.csv \\
       --white-data ./data/white.csv \\
@@ -1071,13 +1097,13 @@ Examples:
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
     parser.add_argument('--class-weight', type=float, default=1.0,
-                        help='欺诈样本权重(用于处理不均衡，默认1.0)')
+                        help='欺诈样本权重（用于处理不均衡，默认1.0）')
     parser.add_argument('--mode', type=str, choices=['cpu', 'npu', 'dist'],
                         default='cpu', help='运行模式')
-    parser.add_argument('--npu-feature', action='store_true',
-                        help='使用NPU加速特征生成(需配合--mode npu)')
     parser.add_argument('--workers', type=int, default=4,
                         help='分布式worker数量')
+    parser.add_argument('--npu-feature', action='store_true',
+                        help='使用NPU加速特征生成(需配合--mode npu)')
 
     args = parser.parse_args()
 
