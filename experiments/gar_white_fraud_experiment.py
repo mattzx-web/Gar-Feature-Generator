@@ -759,7 +759,9 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
         n_total = len(combined_df)
         fraud_count_val = int(combined_df[label_col].sum())
         white_count_val = int(n_total - fraud_count_val)
-        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)], dtype=np.object_)
+        split_arr = np.empty(n_total, dtype='U5')
+        split_arr[:] = 'test'
+        split_arr[train_idx] = 'train'
 
         key_cols = [c for c in [card_col, 'timestamp', '时间戳'] if c in combined_df.columns]
         key_col_arrays = {c: combined_df[c].values for c in key_cols}
@@ -829,7 +831,9 @@ def generate_features_step(fraud_data_path, white_data_path, output_dir,
         n_total = len(combined_df)
         fraud_count_val = int(combined_df[label_col].sum())
         white_count_val = int(n_total - fraud_count_val)
-        split_arr = np.array(['train' if i in train_idx else 'test' for i in range(n_total)])
+        split_arr = np.empty(n_total, dtype='U5')
+        split_arr[:] = 'test'
+        split_arr[train_idx] = 'train'
         key_cols = [c for c in ['card_id', '卡号', 'timestamp', '时间戳'] if c in combined_df.columns]
 
         features_csv = os.path.join(output_dir, 'gar_features.csv')
